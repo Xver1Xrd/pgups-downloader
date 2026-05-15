@@ -1,0 +1,7 @@
+{
+  "login": "your@email.com",
+  "password": "your-password",
+  "courses": [
+    {"id": "4388", "url": "https://sdo.pgups.ru/course/view.php?id=4388"}
+  ]
+}

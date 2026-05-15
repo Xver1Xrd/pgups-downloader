@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Настройки — PGUPS{% endblock %}
+{% block content %}
+<h1 class="page-title">Настройки</h1>
+
+<div class="grid-2">
+  <div class="card">
+    <div class="card-title">Курсы <span style="font-weight:400;font-size:13px;color:var(--text-secondary);">({{ courses|length }})</span></div>
+    <ul class="check-list" id="course-list">
+      {% for c in courses %}
+      <li style="display:flex;justify-content:space-between;align-items:center;">
+        <span>{{ c.name }} <span style="color:var(--text-secondary);font-size:12px;">(id: {{ c.id }})</span></span>
+        <button class="btn btn-danger btn-sm" onclick="removeCourse('{{ c.id }}')">Удалить</button>
+      </li>
+      {% endfor %}
+    </ul>
+    <a href="/add-course" class="btn btn-outline btn-sm" style="margin-top:10px;">Добавить курс</a>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Аккаунт</div>
+    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+      Логин: <strong>{{ login or 'не указан' }}</strong>
+    </p>
+    <button class="btn btn-outline btn-sm" onclick="showLoginForm()">Сменить пароль</button>
+    <div id="login-form" style="display:none;margin-top:12px;">
+      <div class="form-group">
+        <label class="form-label">Новый пароль</label>
+        <input type="password" id="new-password" class="form-input" placeholder="Пароль">
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="savePassword()">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Прочее</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <button class="btn btn-outline btn-sm" onclick="clearLogs()">Очистить логи</button>
+    <a href="/" class="btn btn-outline btn-sm">Успеваемость</a>
+    <a href="/download" class="btn btn-outline btn-sm">Скачивание</a>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function showLoginForm() {
+  document.getElementById('login-form').style.display = 'block';
+}
+
+async function savePassword() {
+  const password = document.getElementById('new-password').value.trim();
+  if (!password) return;
+  await fetch('/api/settings/login', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({password}),
+  });
+  flash('Пароль сохранён. Перезапустите сервер.', 'success');
+}
+
+function removeCourse(id) {
+  if (!confirm('Удалить курс ' + id + '?')) return;
+  fetch('/api/settings/courses', {
+    method: 'DELETE', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id}),
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') { flash('Курс удалён', 'success'); setTimeout(() => location.reload(), 500); }
+  });
+}
+
+function clearLogs() {
+  fetch('/api/settings/logs', {method: 'DELETE'})
+    .then(r => r.json()).then(d => { if (d.status === 'ok') flash('Логи очищены', 'success'); });
+}
+</script>
+{% endblock %}

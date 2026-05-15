@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Курс — PGUPS{% endblock %}
+{% block content %}
+<h1 class="page-title" id="course-title">Загрузка…</h1>
+<div class="status-bar" id="status-bar">Загрузка…</div>
+<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+  <button class="btn btn-primary btn-sm" onclick="downloadCourse()">Скачать этот курс</button>
+  <a href="/" class="btn btn-outline btn-sm">← На главную</a>
+</div>
+<div class="card">
+  <div class="stats" id="stats"></div>
+  <div class="item-list" id="item-list"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const courseId = '{{ course_id }}';
+let prevItems = {};
+
+function render(data) {
+  document.getElementById('course-title').textContent = data.name;
+  document.getElementById('stats').innerHTML = `
+    <span class="stat stat-ok">✅ ${data.passed}</span>
+    <span class="stat stat-fail">❌ ${data.failed}</span>
+    <span class="stat stat-sub">📤 ${data.submitted}</span>
+    <span class="stat stat-lock">🔒 ${data.locked}</span>
+    <span class="stat stat-pend">⏳ ${data.pending}</span>
+  `;
+  const list = document.getElementById('item-list');
+  list.innerHTML = (data.items || []).map(i => {
+    const old = prevItems[i.name];
+    const changed = old && old !== i.status;
+    const cls = changed ? 'item-row changed' : 'item-row';
+    const prevHtml = changed ? `<span class="item-prev">← ${old}</span>` : '';
+    if (!prevItems[i.name]) prevItems[i.name] = i.status;
+    else if (changed) prevItems[i.name] = i.status;
+    return `<div class="${cls}"><span class="item-name">${i.name}</span><span class="item-status">${i.status}${prevHtml}</span></div>`;
+  }).join('');
+}
+
+function downloadCourse() {
+  fetch('/api/download', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({course_ids: [courseId]}),
+  }).then(r => r.json()).then(d => {
+    if (d.error) flash(d.error, 'error');
+    else flash('Скачивание запущено', 'success');
+  });
+}
+
+async function fetchData() {
+  const bar = document.getElementById('status-bar');
+  try {
+    const r = await fetch(`/api/course/${courseId}`);
+    const data = await r.json();
+    if (data.error) { document.getElementById('course-title').textContent = 'Ошибка'; bar.textContent = data.error; return; }
+    render(data);
+    bar.textContent = 'Обновлено: ' + new Date().toLocaleTimeString('ru-RU');
+  } catch(e) { bar.textContent = 'Ошибка обновления'; }
+}
+setInterval(fetchData, 15000);
+fetchData();
+</script>
+{% endblock %}

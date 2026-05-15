@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}Успеваемость — PGUPS{% endblock %}
+{% block content %}
+<h1 class="page-title">Успеваемость по курсам</h1>
+<div class="status-bar" id="status-bar">Загрузка…</div>
+<div id="course-grid" class="course-grid"></div>
+{% endblock %}
+{% block scripts %}
+<script>
+const STATUS_ICONS = {
+  '+': '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>',
+  '-': '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M4.22 4.22a.75.75 0 0 1 1.06 0L8 6.94l2.72-2.72a.75.75 0 1 1 1.06 1.06L9.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L8 9.06l-2.72 2.72a.75.75 0 0 1-1.06-1.06L6.94 8 4.22 5.28a.75.75 0 0 1 0-1.06z"/></svg>',
+  '~': '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a.75.75 0 0 1 .75.75v9.69l2.72-2.72a.75.75 0 1 1 1.06 1.06l-4 4a.75.75 0 0 1-1.06 0l-4-4a.75.75 0 0 1 1.06-1.06l2.72 2.72V1.75A.75.75 0 0 1 8 1z"/></svg>',
+  '#': '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a4 4 0 0 0-4 4v2H3a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1h-1V5a4 4 0 0 0-4-4zm2 6V5a2 2 0 1 0-4 0v2h4z"/></svg>',
+  '.': '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 12.5A5.5 5.5 0 1 1 8 2.5a5.5 5.5 0 0 1 0 11z"/><path d="M8 4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 8 4z"/><circle cx="8" cy="11" r=".75"/></svg>',
+  '?': '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 12.5A5.5 5.5 0 1 1 8 2.5a5.5 5.5 0 0 1 0 11z"/><text x="8" y="11" text-anchor="middle" fill="currentColor" font-size="9" font-weight="bold">?</text></svg>',
+};
+
+function fmtStatus(status) {
+  const prefix = status[0];
+  const icon = STATUS_ICONS[prefix] || '';
+  const text = status.slice(1).trim();
+  const cls = prefix === '+' ? 'ok' : prefix === '-' ? 'fail' : prefix === '~' ? 'sub' : prefix === '#' ? 'lock' : prefix === '?' ? 'warn' : 'pend';
+  return `<span class="item-icon item-icon-${cls}">${icon}</span><span>${text}</span>`;
+}
+
+function skeleton(count) {
+  return Array(count).fill(0).map(() => `<div class="skeleton-card" style="animation:fadeIn .3s ease both">
+    <div class="skeleton-line skeleton-line-short"></div>
+    <div class="skeleton-line"></div>
+    <div class="skeleton-stats">${Array(5).fill(0).map(() => '<div class="skeleton-stat"></div>').join('')}</div>
+  </div>`).join('');
+}
+
+async function fetchData() {
+  const bar = document.getElementById('status-bar');
+  const grid = document.getElementById('course-grid');
+  grid.innerHTML = skeleton(8);
+  bar.textContent = 'Загрузка…';
+  try {
+    const r = await fetch('/api/courses');
+    const data = await r.json();
+    if (!data.courses || data.courses.length === 0) {
+      grid.innerHTML = '<div class="card"><p style="color:var(--text-secondary);">Нет курсов. <a href="/add-course">Добавьте курс</a></p></div>';
+      bar.textContent = '';
+      return;
+    }
+    grid.innerHTML = data.courses.map((c, ci) => {
+      if (c.error) {
+        return `<div class="course-card" style="animation-delay:${ci*0.06}s"><div class="course-card-header"><span class="course-card-title error">${c.name}</span></div></div>`;
+      }
+      const total = c.passed + c.failed + c.submitted + c.locked + c.pending;
+      const done = c.passed + c.failed;
+      const pct = total ? Math.round(done / total * 100) : 0;
+      const barColor = pct === 100 ? 'var(--success)' : pct > 50 ? 'var(--warning)' : 'var(--accent)';
+
+      const items = c.items || [];
+      const limit = 10;
+
+      const itemsHtml = items.map((i, ii) => {
+        const isExtra = ii >= limit;
+        const cls = (i.changed ? 'item-row changed' : 'item-row') + (isExtra ? ' extra' : '');
+        const prevHtml = i.prev_status ? `<span class="item-prev">← ${i.prev_status}</span>` : '';
+        return `<div class="${cls}" style="animation-delay:${(ci*0.06 + ii*0.025)+0.15}s">
+          <span class="item-name">${i.name}</span>
+          <span class="item-status">${fmtStatus(i.status)}${prevHtml}</span>
+        </div>`;
+      }).join('') + (items.length > limit ? `<div class="item-row" style="justify-content:center;padding-top:6px;">
+        <button class="btn btn-outline btn-sm" onclick="const p=this.parentElement.parentElement;p.querySelectorAll('.item-row.extra').forEach(e=>e.style.display='flex');this.remove()">
+          + ещё ${items.length - limit}
+        </button>
+      </div>` : '');
+
+      return `<div class="course-card" style="animation-delay:${ci*0.06}s">
+        <div class="course-card-header">
+          <a class="course-card-title" href="/course/${c.id}">${c.name}</a>
+          <div class="stats">
+            <span class="stat stat-ok">${STATUS_ICONS['+']}${c.passed}</span>
+            <span class="stat stat-fail">${STATUS_ICONS['-']}${c.failed}</span>
+            <span class="stat stat-sub">${STATUS_ICONS['~']}${c.submitted}</span>
+            <span class="stat stat-lock">${STATUS_ICONS['#']}${c.locked}</span>
+            <span class="stat stat-pend">${STATUS_ICONS['.']}${c.pending}</span>
+          </div>
+        </div>
+        <div class="progress-mini"><div class="progress-mini-fill" style="width:${pct}%;background:${barColor}"></div></div>
+        ${itemsHtml ? `<div class="item-list">${itemsHtml}</div>` : ''}
+      </div>`;
+    }).join('');
+    bar.textContent = 'Обновлено: ' + new Date().toLocaleTimeString('ru-RU');
+  } catch(e) {
+    grid.innerHTML = skeleton(8);
+    bar.textContent = 'Ошибка загрузки';
+  }
+}
+setInterval(fetchData, 60000);
+fetchData();
+</script>
+{% endblock %}

@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Скачивание — PGUPS{% endblock %}
+{% block content %}
+<h1 class="page-title">Скачивание лабораторных</h1>
+
+<div class="card">
+  <div class="card-title">Выберите курсы</div>
+  <ul class="check-list" id="course-list">
+    {% for c in courses %}
+    <li><label><input type="checkbox" value="{{ c.id }}" checked> {{ c.name }} <span style="color:var(--text-secondary);font-size:12px;">(id: {{ c.id }})</span></label></li>
+    {% endfor %}
+  </ul>
+  <div class="form-group" style="margin-top:14px;">
+    <label class="form-label" for="workers">Количество потоков</label>
+    <input type="number" id="workers" class="form-input" value="{{ default_workers }}" min="1" max="10" style="width:100px;">
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <button class="btn btn-primary" onclick="startDownload()">Начать скачивание</button>
+    <button class="btn btn-outline" onclick="startDownloadAll()">Скачать всё</button>
+  </div>
+</div>
+
+<div class="card" id="progress-card" style="display:none;">
+  <div class="card-title">Статус скачивания</div>
+  <div id="progress-message" style="font-size:14px;"></div>
+  <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+  <div id="progress-text" class="subtext"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function getSelected() {
+  const checks = document.querySelectorAll('#course-list input:checked');
+  return Array.from(checks).map(c => c.value);
+}
+
+function startDownloadAll() {
+  document.querySelectorAll('#course-list input').forEach(c => c.checked = true);
+  startDownload();
+}
+
+function startDownload() {
+  const ids = getSelected();
+  if (ids.length === 0) { flash('Выберите хотя бы один курс', 'error'); return; }
+  const workers = document.getElementById('workers').value || 3;
+  fetch('/api/download', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({course_ids: ids, workers: parseInt(workers)}),
+  }).then(r => r.json()).then(d => {
+    if (d.error) { flash(d.error, 'error'); return; }
+    flash('Скачивание запущено', 'success');
+    pollProgress();
+  });
+}
+
+function pollProgress() {
+  const card = document.getElementById('progress-card');
+  const msg = document.getElementById('progress-message');
+  const fill = document.getElementById('progress-fill');
+  const text = document.getElementById('progress-text');
+  card.style.display = 'block';
+  const iv = setInterval(async () => {
+    const r = await fetch('/api/download/status');
+    const d = await r.json();
+    msg.textContent = d.message;
+    if (d.progress) {
+      const parts = d.progress.split('/');
+      const done = parseInt(parts[0]), total = parseInt(parts[1]);
+      fill.style.width = total > 0 ? Math.round(done/total*100) + '%' : '0%';
+      text.textContent = d.progress;
+    }
+    if (!d.running) { clearInterval(iv); }
+  }, 1000);
+}
+</script>
+{% endblock %}
