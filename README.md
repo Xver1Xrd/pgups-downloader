@@ -36,13 +36,15 @@ venv/bin/python pgups_downloader.py --web
 
 ### Защита веб-интерфейса
 
-Можно добавить HTTP Basic Auth через переменную окружения:
+По умолчанию HTTP Basic Auth включён. Установите переменные окружения:
 
-```
-WEB_AUTH="admin:secure_password" venv/bin/python pgups_downloader.py --web
+```bash
+PGUPS_AUTH_USER=admin PGUPS_AUTH_PASS=secure_password venv/bin/python pgups_downloader.py --web
 ```
 
-Формат: `WEB_AUTH="user:password"`
+Для отключения: `PGUPS_AUTH=0`
+
+Формат заголовка авторизации: `Authorization: Basic base64(user:password)`
 
 ## Как работает авторизация
 
