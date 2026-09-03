@@ -81,8 +81,10 @@ last_check: dict[str, dict] = {}
 check_lock = threading.Lock()
 download_status = {"running": False, "message": "", "progress": ""}
 download_lock = threading.Lock()
-_courses_cache = {"data": None, "time": 0}
-CACHE_TTL = 300
+_courses_cache = {"data": None, "time": 0, "stale": None, "stale_time": 0}
+CACHE_TTL = 600
+AUTH_CACHE_TTL = 120
+_auth_cache = {"authenticated": None, "time": 0}
 
 
 def get_creds() -> tuple[str, str]:
@@ -90,15 +92,34 @@ def get_creds() -> tuple[str, str]:
     return cfg.get("login", ""), cfg.get("password", "")
 
 
+def _is_auth_cached() -> bool:
+    now = time.time()
+    return _auth_cache["authenticated"] is not None and now - _auth_cache["time"] < AUTH_CACHE_TTL
+
+
+def _get_auth_status() -> bool:
+    now = time.time()
+    if _is_auth_cached():
+        return _auth_cache["authenticated"]
+    result = dl.verify_auth()
+    _auth_cache["authenticated"] = result
+    _auth_cache["time"] = now
+    return result
+
+
 def ensure_auth():
     with auth_lock:
-        if dl.verify_auth():
+        if _get_auth_status():
             return True
         login, password = get_creds()
         if login and password:
             ok = dl.login_via_portal(login, password)
             if ok:
+                _auth_cache["authenticated"] = True
+                _auth_cache["time"] = time.time()
                 return True
+        _auth_cache["authenticated"] = False
+        _auth_cache["time"] = time.time()
         return False
 
 
@@ -136,10 +157,10 @@ def add_cache_headers(response):
 
 @app.route("/api/auth/status")
 def api_auth_status():
-    ok = dl.verify_auth()
+    authenticated = _get_auth_status()
     login, _ = get_creds()
     return jsonify({
-        "authenticated": ok,
+        "authenticated": authenticated,
         "login": login if login else None,
     })
 
@@ -232,16 +253,35 @@ def api_courses():
     with courses_lock:
         courses_snapshot = list(dl.courses)
     cache_key = cache_hash(courses_snapshot)
+
+    # Serve stale data while refreshing
+    is_stale = (
+        _courses_cache.get("_key") == cache_key
+        and _courses_cache["stale"] is not None
+        and now - _courses_cache["stale_time"] < CACHE_TTL * 2
+    )
+
+    if is_stale:
+        # Return stale cache immediately, refresh in background
+        threading.Thread(target=_refresh_courses, args=(courses_snapshot,), daemon=True).start()
+        return jsonify(_courses_cache["stale"])
+
     if _courses_cache.get("_key") == cache_key and _courses_cache["data"] and now - _courses_cache["time"] < CACHE_TTL:
         return jsonify(_courses_cache["data"])
 
+    _do_refresh_courses(courses_snapshot)
+    return jsonify(_courses_cache["data"] or {"courses": []})
+
+
+def _do_refresh_courses(courses_snapshot: list):
+    now = time.time()
     ok = ensure_auth()
     if not ok:
         result = {"courses": [{"id": c["id"], "name": "Нет авторизации", "error": True} for c in courses_snapshot]}
         _courses_cache["data"] = result
         _courses_cache["time"] = now
-        _courses_cache["_key"] = cache_key
-        return jsonify(result)
+        _courses_cache["_key"] = cache_hash(courses_snapshot)
+        return
 
     cookies = list(dl.session.cookies)
     headers = dict(dl.session.headers)
@@ -274,10 +314,18 @@ def api_courses():
                         item["prev_status"] = old[item["name"]]
 
     data = {"courses": results}
+    _courses_cache["stale"] = _courses_cache["data"]
+    _courses_cache["stale_time"] = now
     _courses_cache["data"] = data
     _courses_cache["time"] = now
-    _courses_cache["_key"] = cache_key
-    return jsonify(data)
+    _courses_cache["_key"] = cache_hash(courses_snapshot)
+
+
+def _refresh_courses(courses_snapshot: list):
+    try:
+        _do_refresh_courses(courses_snapshot)
+    except Exception:
+        pass
 
 
 @app.route("/api/course/<course_id>")
@@ -448,4 +496,19 @@ if __name__ == "__main__":
         ensure_auth()
     port = int(os.environ.get("PORT", 5000))
     log(f"[WEB] Сервер запущен на http://127.0.0.1:{port}")
+
+    # Preload cache in background
+    threading.Thread(target=_preload_cache, daemon=True).start()
+
     app.run(host="127.0.0.1", port=port, debug=False)
+
+
+def _preload_cache():
+    time.sleep(2)
+    try:
+        with courses_lock:
+            snapshot = list(dl.courses)
+        _do_refresh_courses(snapshot)
+        log("[WEB] Кэш предзагружен")
+    except Exception as e:
+        log(f"[WEB] Ошибка предзагрузки кэша: {e}")
