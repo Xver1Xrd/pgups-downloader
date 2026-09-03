@@ -6,6 +6,7 @@ import time
 import base64
 import hashlib
 import threading
+import signal
 from pathlib import Path
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,6 +33,9 @@ _rate_limit_lock = threading.Lock()
 _rate_limit_window = 60
 _rate_limit_max = 30
 _request_log: dict[str, list[float]] = {}
+
+# Config cache to avoid repeated disk reads
+_config_cache = {"data": None, "time": 0, "ttl": 30}
 
 
 def _load_secret_key() -> bytes:
@@ -109,8 +113,25 @@ AUTH_CACHE_TTL = 120
 _auth_cache = {"authenticated": None, "time": 0}
 
 
+def _load_config_cached() -> dict:
+    """Load config with 30-second cache to avoid repeated disk reads."""
+    now = time.time()
+    if (
+        _config_cache["data"] is not None
+        and now - _config_cache["time"] < _config_cache["ttl"]
+    ):
+        return _config_cache["data"]
+    try:
+        data = load_config()
+        _config_cache["data"] = data
+        _config_cache["time"] = now
+        return data
+    except Exception:
+        return _config_cache["data"] or {}
+
+
 def get_creds() -> tuple[str, str]:
-    cfg = load_config()
+    cfg = _load_config_cached()
     return cfg.get("login", ""), cfg.get("password", "")
 
 
@@ -247,7 +268,8 @@ def settings_page():
     with courses_lock:
         cfg_courses = list(dl.courses)
     courses_with_names = _load_course_names_parallel(cfg_courses)
-    return render_template("settings.html", courses=courses_with_names, login=load_config().get("login"))
+    cfg = _load_config_cached()
+    return render_template("settings.html", courses=courses_with_names, login=cfg.get("login"))
 
 
 def fetch_one_course(course: dict, cookies: list = None, headers: dict = None) -> dict | None:
@@ -393,11 +415,6 @@ def api_download():
     if not courses:
         return jsonify({"error": "Курсы не найдены"}), 404
 
-    # Store original values under lock
-    with courses_lock:
-        original_courses = list(dl.courses)
-    original_workers = dl.workers
-
     with download_lock:
         if download_status["running"]:
             return jsonify({"error": "Скачивание уже выполняется"}), 409
@@ -405,16 +422,21 @@ def api_download():
         download_status["message"] = "Запуск..."
         download_status["progress"] = ""
 
+    # Store original values under lock before starting thread
+    with courses_lock:
+        original_courses = list(dl.courses)
+    original_workers = dl.workers
+    download_type_local = download_type
+
     def run_dl():
         nonlocal original_workers
-        # Mutate global state under lock
         with courses_lock:
             dl.courses = courses
         dl.workers = workers
         try:
             log(f"\n[WEB] Скачивание {len(courses)} курсов ({workers} потоков)")
             download_status["message"] = "Сбор заданий..."
-            tasks = dl.collect_tasks(download_type=download_type)
+            tasks = dl.collect_tasks(download_type=download_type_local)
             if not tasks:
                 download_status["message"] = "Нет файлов для скачивания"
                 download_status["progress"] = "0/0"
@@ -457,12 +479,15 @@ def api_settings_login():
     data = request.get_json()
     login = data.get("login", "").strip()
     password = data.get("password", "").strip()
-    cfg = load_config()
+    cfg = _load_config_cached()
     if login:
         cfg["login"] = login
     if password:
         cfg["password"] = password
     save_config(cfg)
+    # Invalidate config cache
+    _config_cache["data"] = None
+    _config_cache["time"] = 0
     log("[WEB] Логин/пароль сохранены")
     clear_courses_cache(_courses_cache)
     return jsonify({"status": "ok"})
@@ -470,7 +495,7 @@ def api_settings_login():
 
 @app.route("/api/settings/courses", methods=["GET", "POST", "DELETE"])
 def api_settings_courses():
-    cfg = load_config()
+    cfg = _load_config_cached()
     with courses_lock:
         courses = list(dl.courses)
 
@@ -535,7 +560,39 @@ def _preload_cache():
 
 
 # Preload cache when module is imported (works for both direct run and --web)
+_preload_started = False
+
+
+def _preload_cache():
+    global _preload_started
+    if _preload_started:
+        return
+    _preload_started = True
+    time.sleep(2)
+    try:
+        with courses_lock:
+            snapshot = list(dl.courses)
+        _do_refresh_courses(snapshot)
+        log("[WEB] Кэш предзагружен")
+    except Exception as e:
+        log(f"[WEB] Ошибка предзагрузки кэша: {e}")
+
+
+# Preload cache when module is imported
 threading.Thread(target=_preload_cache, daemon=True).start()
+
+
+def _signal_handler(signum, frame):
+    """Graceful shutdown handler."""
+    log("[WEB] Получен сигнал завершения, ожидаем потоки...")
+    # Wait for download thread to finish
+    while download_status["running"]:
+        time.sleep(0.5)
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 
 if __name__ == "__main__":

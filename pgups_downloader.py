@@ -6,7 +6,6 @@ import json
 import time
 import subprocess
 import hashlib
-import logging
 from pathlib import Path
 from urllib.parse import urljoin, unquote
 from bs4 import BeautifulSoup
@@ -43,6 +42,20 @@ def _rotate_log():
             LOG_FILE.rename(LOG_DIR / "pgups.1.log")
     except OSError:
         pass
+
+
+def _atomic_write(filepath: Path, content: str):
+    """Write content atomically using temp file + rename."""
+    tmp_path = filepath.with_suffix(".tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        tmp_path.replace(filepath)
+    except OSError:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
 
 
 def log(msg: str):
@@ -83,8 +96,8 @@ def load_config() -> dict:
 
 def save_config(cfg: dict):
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        content = json.dumps(cfg, indent=2, ensure_ascii=False)
+        _atomic_write(CONFIG_FILE, content)
     except OSError as e:
         log(f"[!] Ошибка записи config.json: {e}")
 
@@ -191,14 +204,11 @@ class PgupsDownloader:
             login_in_url = "login" in r.url.lower()
             guest_in_text = "Гость" in r.text or "гостевой доступ" in r.text.lower()
             if login_in_url:
-                log("[DEBUG]  → перенаправлен на логин")
                 return False
             if guest_in_text:
-                log("[DEBUG]  → гостевой доступ")
                 return False
             return True
-        except Exception as e:
-            log(f"[DEBUG] verify_auth error: {e}")
+        except Exception:
             return False
 
     def login(self, username: str, password: str) -> bool:
@@ -270,8 +280,8 @@ class PgupsDownloader:
             expires = str(int(cookie.expires)) if cookie.expires and cookie.expires > 0 else str(now_ts)
             lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{cookie.name}\t{cookie.value}")
         try:
-            with open(COOKIES_FILE, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
+            content = "\n".join(lines) + "\n"
+            _atomic_write(COOKIES_FILE, content)
             log(f"[*] Сохранено {len(seen)} cookies")
         except OSError as e:
             log(f"[!] Ошибка сохранения cookies: {e}")
@@ -375,15 +385,23 @@ class PgupsDownloader:
                         log("[✓] Вход через портал выполнен")
                         break
 
-                    log(f"[DEBUG] verify_auth упал, пробуем принудительный переход на sdo.pgups.ru")
+                    log("[*] Запуск SSO через my.pgups.ru/auth/sdo…")
+                    sso_r = self.get(f"{MY_BASE_URL}/auth/sdo", timeout=15, allow_redirects=True)
+                    self._save_session_cookies()
+                    if self.verify_auth():
+                        success = True
+                        log("[✓] Вход через портал выполнен")
+                        break
+
+                    log("[*] SSO не дал авторизации, пробуем принудительный переход")
                     try:
                         force_r = self.get(f"{BASE_URL}/my/", timeout=10, allow_redirects=True)
                         if self.verify_auth():
                             success = True
                             log("[✓] Вход через портал выполнен (принудительно)")
                             break
-                    except Exception as e2:
-                        log(f"[DEBUG] Принудительный переход не удался: {e2}")
+                    except Exception:
+                        pass
 
                 log(f"[✗] Попытка {attempt + 1} не удалась")
                 if not captcha:
@@ -514,7 +532,10 @@ class PgupsDownloader:
                 size = r.headers.get("Content-Length")
                 etag = r.headers.get("ETag")
                 if size:
-                    return int(size), etag
+                    try:
+                        return int(size), etag
+                    except (ValueError, TypeError):
+                        return None, etag
         except Exception:
             pass
         return None, None
@@ -794,10 +815,20 @@ class PgupsDownloader:
 
         prev: dict[str, str] = {}
         first = True
+        consecutive_errors = 0
 
         try:
             while True:
-                results, _ = self.check_course(course_url)
+                try:
+                    results, _ = self.check_course(course_url)
+                    consecutive_errors = 0
+                except Exception:
+                    consecutive_errors += 1
+                    max_wait = min(300, interval * (2 ** consecutive_errors))
+                    log(f"[!] Ошибка при проверке, ждём {max_wait}с (ошибок: {consecutive_errors})")
+                    time.sleep(max_wait)
+                    continue
+
                 curr = fmt(results)
                 timestamp = time.strftime("%H:%M:%S")
 
@@ -829,7 +860,7 @@ class PgupsDownloader:
 
     def _clear_screen(self):
         try:
-            subprocess.run(["clear"], check=False, shell=(os.name != "posix"))
+            subprocess.run(["clear"], check=False, shell=(os.name != "posix"), timeout=2)
         except Exception:
             pass
 

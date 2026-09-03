@@ -1,8 +1,4 @@
 import hashlib
-from threading import Lock
-
-_status_lock = Lock()
-_status_cache: dict[str, dict] = {}
 
 
 def count_statuses(rows: list[dict]) -> dict:
@@ -37,7 +33,9 @@ def cache_hash(data: list) -> str:
 
 
 def clear_courses_cache(cache: dict) -> None:
-    """Очистить кеш курсов."""
-    with _status_lock:
-        cache["data"] = None
-        cache["time"] = 0
+    """Очистить кеш курсов полностью."""
+    cache["data"] = None
+    cache["time"] = 0
+    cache["stale"] = None
+    cache["stale_time"] = 0
+    cache["_key"] = ""
