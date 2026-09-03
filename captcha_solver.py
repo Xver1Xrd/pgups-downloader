@@ -74,24 +74,6 @@ def solve_one_captcha(img_bytes: bytes) -> str | None:
     return None
 
 
-def auto_solve_captcha(session, max_retries: int = 4) -> str | None:
-    for attempt in range(max_retries):
-        try:
-            r = session.get(f"{MY_BASE_URL}/login", timeout=15)
-            soup = BeautifulSoup(r.text, "html.parser")
-            cap = soup.find("img", alt=lambda a: a and "captcha" in a.lower())
-            if not cap:
-                continue
-            captcha_url = urljoin(MY_BASE_URL, cap.get("src", ""))
-            r_img = session.get(captcha_url, timeout=15)
-            text = solve_one_captcha(r_img.content)
-            if text:
-                return text
-        except Exception:
-            continue
-    return None
-
-
 def get_csrf_and_captcha(session):
     try:
         r = session.get(f"{MY_BASE_URL}/login", timeout=15)

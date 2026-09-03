@@ -22,6 +22,17 @@ from utils import count_statuses, cache_hash, clear_courses_cache
 # Persistent secret key: stored in a file so sessions survive restarts
 _SECRET_KEY_FILE = Path(__file__).parent / ".secret_key"
 
+# HTTP Basic Auth (enabled by default via PGUPS_AUTH env)
+_AUTH_ENABLED = os.environ.get("PGUPS_AUTH", "1") != "0"
+_AUTH_USER = os.environ.get("PGUPS_AUTH_USER", "")
+_AUTH_PASS = os.environ.get("PGUPS_AUTH_PASS", "")
+
+# Rate limiting: track recent requests per IP
+_rate_limit_lock = threading.Lock()
+_rate_limit_window = 60
+_rate_limit_max = 30
+_request_log: dict[str, list[float]] = {}
+
 
 def _load_secret_key() -> bytes:
     if _SECRET_KEY_FILE.exists():
@@ -38,35 +49,46 @@ def _load_secret_key() -> bytes:
 
 
 def _check_web_auth():
-    """Optional HTTP Basic Auth via WEB_AUTH env var (format: 'user:password')."""
-    auth_env = os.environ.get("WEB_AUTH", "")
-    if not auth_env:
+    """HTTP Basic Auth - required by default unless PGUPS_AUTH=0."""
+    if not _AUTH_ENABLED:
         return True
-    parts = auth_env.split(":", 1)
-    if len(parts) != 2:
-        return True
-    expected_user, expected_pass = parts
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Basic "):
         return False
     try:
         decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
         user, password = decoded.split(":", 1)
-        return user == expected_user and password == expected_pass
+        return user == _AUTH_USER and password == _AUTH_PASS
     except Exception:
         return False
+
+
+def _check_rate_limit() -> bool:
+    """Return True if request is allowed."""
+    now = time.time()
+    ip = request.remote_addr or "127.0.0.1"
+    with _rate_limit_lock:
+        if ip not in _request_log:
+            _request_log[ip] = []
+        # Remove old entries
+        _request_log[ip] = [t for t in _request_log[ip] if now - t < _rate_limit_window]
+        if len(_request_log[ip]) >= _rate_limit_max:
+            return False
+        _request_log[ip].append(now)
+        return True
 
 
 def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if not _check_web_auth():
-            auth_env = os.environ.get("WEB_AUTH", "")
-            if auth_env:
-                from flask import make_response
-                resp = make_response("Authentication required", 401)
-                resp.headers["WWW-Authenticate"] = 'Basic realm="PGUPS"'
-                return resp
+            from flask import make_response
+            resp = make_response("Authentication required", 401)
+            resp.headers["WWW-Authenticate"] = 'Basic realm="PGUPS"'
+            return resp
+        if not _check_rate_limit():
+            from flask import make_response
+            return make_response("Too many requests. Try again later.", 429)
         return f(*args, **kwargs)
     return decorated
 
@@ -275,50 +297,54 @@ def api_courses():
 
 def _do_refresh_courses(courses_snapshot: list):
     now = time.time()
-    ok = ensure_auth()
-    if not ok:
-        result = {"courses": [{"id": c["id"], "name": "Нет авторизации", "error": True} for c in courses_snapshot]}
-        _courses_cache["data"] = result
+    try:
+        ok = ensure_auth()
+        if not ok:
+            result = {"courses": [{"id": c["id"], "name": "Нет авторизации", "error": True} for c in courses_snapshot]}
+            _courses_cache["data"] = result
+            _courses_cache["time"] = now
+            _courses_cache["_key"] = cache_hash(courses_snapshot)
+            return
+
+        cookies = list(dl.session.cookies)
+        headers = dict(dl.session.headers)
+        results = []
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            fut = {pool.submit(fetch_one_course, c, cookies, headers): c for c in courses_snapshot}
+            for f in as_completed(fut):
+                try:
+                    r = f.result(timeout=30)
+                    if r:
+                        results.append(r)
+                except Exception:
+                    c = fut[f]
+                    results.append({"id": c["id"], "name": f"Курс {c['id']}", "error": True})
+
+        with check_lock:
+            prev = dict(last_check)
+            last_check.clear()
+            for r in results:
+                if r.get("error"):
+                    continue
+                key = r["id"]
+                items = r.get("items", [])
+                last_check[key] = {i["name"]: i["status"] for i in items}
+                if key in prev:
+                    old = prev[key]
+                    for item in items:
+                        if item["name"] in old and old[item["name"]] != item["status"]:
+                            item["changed"] = True
+                            item["prev_status"] = old[item["name"]]
+
+        data = {"courses": results}
+        _courses_cache["stale"] = _courses_cache["data"]
+        _courses_cache["stale_time"] = now
+        _courses_cache["data"] = data
         _courses_cache["time"] = now
         _courses_cache["_key"] = cache_hash(courses_snapshot)
-        return
-
-    cookies = list(dl.session.cookies)
-    headers = dict(dl.session.headers)
-    results = []
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        fut = {pool.submit(fetch_one_course, c, cookies, headers): c for c in courses_snapshot}
-        for f in as_completed(fut):
-            try:
-                r = f.result(timeout=30)
-                if r:
-                    results.append(r)
-            except Exception:
-                c = fut[f]
-                results.append({"id": c["id"], "name": f"Курс {c['id']}", "error": True})
-
-    with check_lock:
-        prev = dict(last_check)
-        last_check.clear()
-        for r in results:
-            if r.get("error"):
-                continue
-            key = r["id"]
-            items = r.get("items", [])
-            last_check[key] = {i["name"]: i["status"] for i in items}
-            if key in prev:
-                old = prev[key]
-                for item in items:
-                    if item["name"] in old and old[item["name"]] != item["status"]:
-                        item["changed"] = True
-                        item["prev_status"] = old[item["name"]]
-
-    data = {"courses": results}
-    _courses_cache["stale"] = _courses_cache["data"]
-    _courses_cache["stale_time"] = now
-    _courses_cache["data"] = data
-    _courses_cache["time"] = now
-    _courses_cache["_key"] = cache_hash(courses_snapshot)
+    except Exception as e:
+        log(f"[WEB] Ошибка обновления кэша курсов: {e}")
+        # Don't invalidate cache on error - keep stale data
 
 
 def _refresh_courses(courses_snapshot: list):
@@ -367,6 +393,11 @@ def api_download():
     if not courses:
         return jsonify({"error": "Курсы не найдены"}), 404
 
+    # Store original values under lock
+    with courses_lock:
+        original_courses = list(dl.courses)
+    original_workers = dl.workers
+
     with download_lock:
         if download_status["running"]:
             return jsonify({"error": "Скачивание уже выполняется"}), 409
@@ -375,10 +406,10 @@ def api_download():
         download_status["progress"] = ""
 
     def run_dl():
+        nonlocal original_workers
+        # Mutate global state under lock
         with courses_lock:
-            original_courses = list(dl.courses)
-        original_workers = dl.workers
-        dl.courses = courses
+            dl.courses = courses
         dl.workers = workers
         try:
             log(f"\n[WEB] Скачивание {len(courses)} курсов ({workers} потоков)")
@@ -463,6 +494,7 @@ def api_settings_courses():
         save_config(cfg)
         with courses_lock:
             dl.courses = list(courses)
+            dl.config["courses"] = list(courses)
         log(f"[WEB] Курс {course_id} добавлен")
         clear_courses_cache(_courses_cache)
         return jsonify({"status": "ok", "id": course_id})
@@ -475,6 +507,7 @@ def api_settings_courses():
         save_config(cfg)
         with courses_lock:
             dl.courses = list(courses)
+            dl.config["courses"] = list(courses)
         log(f"[WEB] Курс {course_id} удалён")
         clear_courses_cache(_courses_cache)
         return jsonify({"status": "ok"})
@@ -490,19 +523,6 @@ def api_clear_logs():
     return jsonify({"status": "ok"})
 
 
-if __name__ == "__main__":
-    login, password = get_creds()
-    if login and password:
-        ensure_auth()
-    port = int(os.environ.get("PORT", 5000))
-    log(f"[WEB] Сервер запущен на http://127.0.0.1:{port}")
-
-    # Preload cache in background
-    threading.Thread(target=_preload_cache, daemon=True).start()
-
-    app.run(host="127.0.0.1", port=port, debug=False)
-
-
 def _preload_cache():
     time.sleep(2)
     try:
@@ -512,3 +532,16 @@ def _preload_cache():
         log("[WEB] Кэш предзагружен")
     except Exception as e:
         log(f"[WEB] Ошибка предзагрузки кэша: {e}")
+
+
+# Preload cache when module is imported (works for both direct run and --web)
+threading.Thread(target=_preload_cache, daemon=True).start()
+
+
+if __name__ == "__main__":
+    login, password = get_creds()
+    if login and password:
+        ensure_auth()
+    port = int(os.environ.get("PORT", 5000))
+    log(f"[WEB] Сервер запущен на http://127.0.0.1:{port}")
+    app.run(host="127.0.0.1", port=port, debug=False)

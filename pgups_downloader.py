@@ -6,13 +6,14 @@ import json
 import time
 import subprocess
 import hashlib
+import logging
 from pathlib import Path
 from urllib.parse import urljoin, unquote
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import requests
-from captcha_solver import auto_solve_captcha, solve_one_captcha, get_csrf_and_captcha
+from captcha_solver import solve_one_captcha, get_csrf_and_captcha
 
 BASE_URL = "https://sdo.pgups.ru"
 MY_BASE_URL = "https://my.pgups.ru"
@@ -21,6 +22,8 @@ COOKIES_FILE = Path(__file__).parent / "cookies.txt"
 DOWNLOAD_BASE = Path.home() / "Документы" / "pgups"
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_FILE = LOG_DIR / "pgups.log"
+MAX_LOG_SIZE = 10 * 1024 * 1024  # 10 MB
+MAX_LOG_FILES = 3
 DEFAULT_WORKERS = 3
 MAX_RETRIES = 3
 RETRY_DELAY = 3
@@ -28,11 +31,26 @@ RETRY_DELAY = 3
 log_lock = Lock()
 
 
+def _rotate_log():
+    """Rotate log files if they exceed MAX_LOG_SIZE."""
+    try:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > MAX_LOG_SIZE:
+            for i in range(MAX_LOG_FILES - 1, 0, -1):
+                src = LOG_DIR / f"pgups.{i}.log"
+                dst = LOG_DIR / f"pgups.{i + 1}.log"
+                if src.exists():
+                    src.rename(dst)
+            LOG_FILE.rename(LOG_DIR / "pgups.1.log")
+    except OSError:
+        pass
+
+
 def log(msg: str):
     with log_lock:
         print(msg)
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         try:
+            _rotate_log()
             with open(LOG_FILE, "a", encoding="utf-8") as f:
                 f.write(msg + "\n")
         except OSError:
@@ -145,7 +163,6 @@ class PgupsDownloader:
 
     def load_cookies(self) -> bool:
         if not COOKIES_FILE.exists():
-            log("[DEBUG] cookies.txt not found")
             return False
         count = 0
         moodle_found = False
@@ -162,9 +179,6 @@ class PgupsDownloader:
                         count += 1
                         if "sdo.pgups.ru" in domain and name == "MoodleSession":
                             moodle_found = True
-                            log(f"[DEBUG] Loaded MoodleSession cookie for {domain}")
-                        elif "sdo.pgups.ru" in domain:
-                            log(f"[DEBUG] Loaded cookie {name} for {domain}")
         except (OSError, UnicodeDecodeError) as e:
             log(f"[!] Ошибка чтения cookies.txt: {e}")
             return False
@@ -176,14 +190,12 @@ class PgupsDownloader:
             r = self.get(f"{BASE_URL}/my/", timeout=10)
             login_in_url = "login" in r.url.lower()
             guest_in_text = "Гость" in r.text or "гостевой доступ" in r.text.lower()
-            log(f"[DEBUG] verify_auth: url={r.url}, has_login={login_in_url}, has_guest={guest_in_text}")
             if login_in_url:
-                log(f"[DEBUG]  → перенаправлен на логин")
+                log("[DEBUG]  → перенаправлен на логин")
                 return False
             if guest_in_text:
-                log(f"[DEBUG]  → гостевой доступ")
+                log("[DEBUG]  → гостевой доступ")
                 return False
-            log(f"[DEBUG]  → авторизован")
             return True
         except Exception as e:
             log(f"[DEBUG] verify_auth error: {e}")
@@ -255,7 +267,7 @@ class PgupsDownloader:
             flag = "TRUE" if domain.startswith(".") else "FALSE"
             path = cookie.path or "/"
             secure = "TRUE" if cookie.secure else "FALSE"
-            expires = str(int(cookie.expires)) if cookie.expires else str(now_ts)
+            expires = str(int(cookie.expires)) if cookie.expires and cookie.expires > 0 else str(now_ts)
             lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{cookie.name}\t{cookie.value}")
         try:
             with open(COOKIES_FILE, "w", encoding="utf-8") as f:
@@ -355,13 +367,9 @@ class PgupsDownloader:
                 if is_success:
                     log(f"[*] Редирект на: {r2.url}")
                     self._save_session_cookies()
-                    log(f"[DEBUG] cookies после входа: {[(c.name, c.domain) for c in self.session.cookies]}")
                     log("[*] Запуск SSO через my.pgups.ru/auth/sdo…")
                     sso_r = self.get(f"{MY_BASE_URL}/auth/sdo", timeout=15, allow_redirects=True)
-                    log(f"[DEBUG] SSO response: url={sso_r.url}, status={sso_r.status_code}")
-                    log(f"[DEBUG] cookies после SSO: {[(c.name, c.domain) for c in self.session.cookies]}")
                     self._save_session_cookies()
-                    log(f"[DEBUG] cookies после сохранения: {[(c.name, c.domain) for c in self.session.cookies]}")
                     if self.verify_auth():
                         success = True
                         log("[✓] Вход через портал выполнен")
@@ -370,7 +378,6 @@ class PgupsDownloader:
                     log(f"[DEBUG] verify_auth упал, пробуем принудительный переход на sdo.pgups.ru")
                     try:
                         force_r = self.get(f"{BASE_URL}/my/", timeout=10, allow_redirects=True)
-                        log(f"[DEBUG] Принудительный переход: url={force_r.url}")
                         if self.verify_auth():
                             success = True
                             log("[✓] Вход через портал выполнен (принудительно)")
@@ -531,6 +538,7 @@ class PgupsDownloader:
             try:
                 remote_size, remote_etag = self.check_remote_size(url)
 
+                # Skip if remote size matches and no ETag (reliable indicator)
                 if remote_size is not None and remote_etag is None:
                     if filepath.exists() and filepath.stat().st_size == remote_size:
                         return False
@@ -545,17 +553,20 @@ class PgupsDownloader:
                         f.write(chunk)
 
                 new_size = tmp_path.stat().st_size
-                local_hash = self.compute_local_hash(tmp_path)
 
-                for existing in folder.iterdir():
-                    if existing.name.endswith(".part") or not existing.is_file():
-                        continue
-                    if existing.name != filepath.name:
-                        existing_hash = self.compute_local_hash(existing)
-                        if existing_hash and local_hash and existing_hash == local_hash:
-                            tmp_path.unlink()
-                            log(f"     уже есть: {existing.name}")
-                            return False
+                # Only compute hash if remote doesn't provide ETag
+                if remote_etag is None:
+                    local_hash = self.compute_local_hash(tmp_path)
+
+                    for existing in folder.iterdir():
+                        if existing.name.endswith(".part") or not existing.is_file():
+                            continue
+                        if existing.name != filepath.name:
+                            existing_hash = self.compute_local_hash(existing)
+                            if existing_hash and local_hash and existing_hash == local_hash:
+                                tmp_path.unlink()
+                                log(f"     уже есть: {existing.name}")
+                                return False
 
                 updated = filepath.exists()
                 if updated:
@@ -832,9 +843,7 @@ class PgupsDownloader:
             log("[!] Укажи ID курса: --course ID")
 
     def ensure_auth(self, username: str = "", password: str = "") -> bool:
-        log(f"[DEBUG] ensure_auth called, username='{username[:10] if username else ''}...'")
         if self.verify_auth():
-            log(f"[DEBUG] Auth OK from cookies")
             return True
 
         log("[*] Сессия истекла, пробую восстановить…")
@@ -844,7 +853,6 @@ class PgupsDownloader:
             password = self.config.get("password", "")
 
         if username and password:
-            log(f"[DEBUG] Trying login with saved credentials")
             if self.login(username, password):
                 return True
             log("[*] Пробую вход через портал с авто-капчей…")
@@ -875,18 +883,20 @@ class PgupsDownloader:
                 if download_type in ("submission", "both"):
                     files = self.get_submission_files(assign["url"])
                     if files:
+                        sub_folder = assign_folder / "submissions" if download_type == "both" else assign_folder
                         log(f"  • {assign_name} ({len(files)} отправка)")
                         course_count += len(files)
                         for f in files:
-                            tasks.append((f["url"], f["filename"], assign_folder))
+                            tasks.append((f["url"], f["filename"], sub_folder))
 
                 if download_type in ("attachment", "both"):
                     files = self.get_attachment_files(assign["url"])
                     if files:
+                        sub_folder = assign_folder / "attachments" if download_type == "both" else assign_folder
                         log(f"  • {assign_name} ({len(files)} задание)")
                         course_count += len(files)
                         for f in files:
-                            tasks.append((f["url"], f["filename"], assign_folder))
+                            tasks.append((f["url"], f["filename"], sub_folder))
 
             if course_count:
                 log(f"  всего файлов: {course_count}")
