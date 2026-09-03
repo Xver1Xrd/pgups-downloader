@@ -16,9 +16,7 @@ const ICONS = {
 };
 
 function fmtStatus(s) {
-  const p = s[0];
-  const txt = s.slice(1).trim();
-  const cls = p==='+'?'ok':p==='-'?'fail':p==='~'?'sub':p==='#'?'lock':'pend';
+  const p = s[0], txt = s.slice(1).trim();
   return `<span class="item-status"><span style="margin-right:3px;">${ICONS[p]||''}</span>${txt}</span>`;
 }
 
@@ -39,7 +37,7 @@ async function fetchData() {
     const r = await fetch('/api/courses');
     const data = await r.json();
     if (!data.courses?.length) {
-      grid.innerHTML = '<div class="card"><p style="color:var(--text-tertiary);font-size:13px;">Нет курсов. <a href="/add-course">Добавьте</a></p></div>';
+      grid.innerHTML = '<div class="card"><p style="color:var(--text-muted);font-size:13px;">Нет курсов. <a href="/add-course">Добавьте</a></p></div>';
       bar.textContent = '';
       return;
     }
@@ -58,11 +56,14 @@ async function fetchData() {
         </div>`
       ).join('');
       const moreBtn = extra ? `<div style="text-align:center;padding:6px 0;">
-        <button class="btn btn-outline btn-sm" onclick="this.parentElement.parentElement.querySelectorAll('.item-row.extra').forEach(e=>e.style.display='flex');this.remove()">+ ещё ${c.items.length - 8}</button>
+        <button class="btn btn-outline btn-sm" onclick="this.parentElement.parentElement.querySelectorAll('.item-row.extra').forEach(e=>e.style.display='flex');this.remove()" style="font-size:11px;padding:4px 10px;">+ ещё ${c.items.length - 8}</button>
       </div>` : '';
-      return `<div class="course-card" style="animation:fadeIn .3s ease both;animation-delay:${i*.06}s">
+      return `<a class="course-card" style="animation:fadeIn .3s ease both;animation-delay:${i*.06}s" href="/course/${c.id}">
         <div class="course-card-header">
-          <a class="course-card-title" href="/course/${c.id}">${c.name}</a>
+          <div style="flex:1;min-width:0">
+            <div class="course-card-title">${c.name}</div>
+            <div class="course-card-meta">${total} заданий</div>
+          </div>
           <div class="stats">
             <span class="stat stat-ok">${ICONS['+']}${c.passed}</span>
             <span class="stat stat-fail">${ICONS['-']}${c.failed}</span>
@@ -74,7 +75,7 @@ async function fetchData() {
         <div class="progress-bar"><div class="progress-bar-fill" style="width:${pct}%;background:${barColor}"></div></div>
         ${itemsHtml ? `<div class="item-list">${itemsHtml}</div>` : ''}
         ${moreBtn}
-      </div>`;
+      </a>`;
     }).join('');
     bar.textContent = 'Обновлено ' + new Date().toLocaleTimeString('ru-RU');
   } catch(e) {

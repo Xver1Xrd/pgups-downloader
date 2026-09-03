@@ -13,7 +13,7 @@
 </div>
 
 <div class="card">
-  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;" id="stats"></div>
+  <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:14px;" id="stats"></div>
   <div id="item-list"></div>
 </div>
 {% endblock %}
@@ -21,6 +21,12 @@
 <script>
 const courseId = '{{ course_id }}';
 let prevItems = {};
+
+const ICONS = {'+':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>',
+'-':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M4.22 4.22a.75.75 0 0 1 1.06 0L8 6.94l2.72-2.72a.75.75 0 1 1 1.06 1.06L9.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L8 9.06l-2.72 2.72a.75.75 0 0 1-1.06-1.06L6.94 8 4.22 5.28a.75.75 0 0 1 0-1.06z"/></svg>',
+'~':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M8 1a.75.75 0 0 1 .75.75v9.69l2.72-2.72a.75.75 0 1 1 1.06 1.06l-4 4a.75.75 0 0 1-1.06 0l-4-4a.75.75 0 0 1 1.06-1.06l2.72 2.72V1.75A.75.75 0 0 1 8 1z"/></svg>',
+'#':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M8 1a4 4 0 0 0-4 4v2H3a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1h-1V5a4 4 0 0 0-4-4zm2 6V5a2 2 0 1 0-4 0v2h4z"/></svg>',
+'.':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 12.5A5.5 5.5 0 1 1 8 2.5a5.5 5.5 0 0 1 0 11z"/><path d="M8 4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 8 4z"/></svg>'};
 
 function render(data) {
   document.getElementById('course-title').textContent = data.name;
@@ -42,7 +48,7 @@ function render(data) {
       <span class="item-name">${i.name}</span>
       <span class="item-status">${i.status}${prev}</span>
     </div>`;
-  }).join('') || '<div style="color:var(--text-tertiary);font-size:13px;padding:12px 0;">Нет заданий</div>';
+  }).join('') || '<div style="color:var(--text-muted);font-size:13px;padding:12px 0;">Нет заданий</div>';
 }
 
 function downloadCourse() {
@@ -51,12 +57,6 @@ function downloadCourse() {
     body: JSON.stringify({course_ids:[courseId]}),
   }).then(r => r.json()).then(d => { d.error ? flash(d.error,'error') : flash('Запущено','success'); });
 }
-
-const ICONS = {'+':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>',
-'-':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M4.22 4.22a.75.75 0 0 1 1.06 0L8 6.94l2.72-2.72a.75.75 0 1 1 1.06 1.06L9.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L8 9.06l-2.72 2.72a.75.75 0 0 1-1.06-1.06L6.94 8 4.22 5.28a.75.75 0 0 1 0-1.06z"/></svg>',
-'~':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M8 1a.75.75 0 0 1 .75.75v9.69l2.72-2.72a.75.75 0 1 1 1.06 1.06l-4 4a.75.75 0 0 1-1.06 0l-4-4a.75.75 0 0 1 1.06-1.06l2.72 2.72V1.75A.75.75 0 0 1 8 1z"/></svg>',
-'#':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M8 1a4 4 0 0 0-4 4v2H3a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1h-1V5a4 4 0 0 0-4-4zm2 6V5a2 2 0 1 0-4 0v2h4z"/></svg>',
-'.':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 12.5A5.5 5.5 0 1 1 8 2.5a5.5 5.5 0 0 1 0 11z"/><path d="M8 4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 8 4z"/></svg>'};
 
 async function fetchData() {
   try {

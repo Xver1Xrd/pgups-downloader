@@ -2,13 +2,13 @@
 {% block title %}Скачивание — PGUPS{% endblock %}
 {% block content %}
 <h1 class="page-title">Скачивание лабораторных</h1>
-<div class="page-subtitle">Выберите курсы и тип файлов для скачивания</div>
+<div class="page-subtitle">Выберите курсы и файлы для скачивания</div>
 
 <div class="card">
-  <div class="card-title"><div class="card-title-dot"></div>Курсы</div>
-  <div style="display:flex;flex-direction:column;gap:6px;">
+  <div class="card-title"><div class="card-title-indicator"></div>Курсы</div>
+  <div style="display:flex;flex-direction:column;gap:4px;" id="course-list">
     {% for c in courses %}
-    <label style="display:flex;align-items:center;gap:10px;font-size:13px;cursor:pointer;padding:6px 8px;border-radius:var(--radius);transition:background .12s;" onmouseover="this.style.background='var(--bg-alt)'" onmouseout="this.style.background='transparent'">
+    <label style="display:flex;align-items:center;gap:10px;font-size:13px;cursor:pointer;padding:7px 10px;border-radius:8px;transition:background var(--transition);" onmouseover="this.style.background='var(--bg-subtle)'" onmouseout="this.style.background='transparent'">
       <input type="checkbox" value="{{ c.id }}" style="width:15px;height:15px;cursor:pointer;accent-color:var(--accent);">
       <span>{{ c.name }}</span>
     </label>
@@ -21,27 +21,27 @@
 </div>
 
 <div class="card">
-  <div class="card-title"><div class="card-title-dot"></div>Тип файлов</div>
-  <div style="display:flex;gap:12px;flex-wrap:wrap;">
-    <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;background:var(--surface);transition:all .12s;" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+  <div class="card-title"><div class="card-title-indicator"></div>Тип файлов</div>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;">
+    <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;background:var(--bg-elevated);transition:all var(--transition);" onmouseover="this.style.borderColor='var(--accent-border)'" onmouseout="this.style.borderColor='var(--border)'">
       <input type="checkbox" id="dl-submission" checked style="width:15px;height:15px;cursor:pointer;accent-color:var(--accent);">
-      <span>Мои отправки — файлы, которые вы уже загрузили</span>
+      <span style="font-size:13px;">Мои отправки — файлы, которые вы уже загрузили</span>
     </label>
-    <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;background:var(--surface);transition:all .12s;" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+    <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;background:var(--bg-elevated);transition:all var(--transition);" onmouseover="this.style.borderColor='var(--accent-border)'" onmouseout="this.style.borderColor='var(--border)'">
       <input type="checkbox" id="dl-attachment" checked style="width:15px;height:15px;cursor:pointer;accent-color:var(--accent);">
-      <span>Задания — условия и материалы от преподавателя</span>
+      <span style="font-size:13px;">Задания — условия и материалы от преподавателя</span>
     </label>
   </div>
 </div>
 
 <div class="card">
-  <div class="card-title"><div class="card-title-dot"></div>Параметры</div>
+  <div class="card-title"><div class="card-title-indicator"></div>Параметры</div>
   <div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;">
     <div style="min-width:180px;">
       <label class="form-label" for="workers">Потоки скачивания</label>
       <input type="number" id="workers" class="form-input" value="{{ default_workers }}" min="1" max="10" style="width:100px;">
     </div>
-    <button class="btn btn-primary" onclick="startDownload()">
+    <button class="btn btn-primary" onclick="startDownload()" style="align-self:flex-end;">
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a.75.75 0 0 1 .75.75v8.39l2.28-2.28a.75.75 0 1 1 1.06 1.06l-3.5 3.5a.75.75 0 0 1-1.06 0l-3.5-3.5a.75.75 0 1 1 1.06-1.06L7.25 10.14V1.75A.75.75 0 0 1 8 1zM1.75 14.25a.75.75 0 0 1 .75.75H14a.75.75 0 0 1 0 1.5H2.5a.75.75 0 0 1-.75-.75z"/></svg>
       Скачать
     </button>
@@ -49,10 +49,10 @@
 </div>
 
 <div class="card" id="progress-card" style="display:none;">
-  <div class="card-title"><div class="card-title-dot"></div>Ход скачивания</div>
+  <div class="card-title"><div class="card-title-indicator"></div>Ход скачивания</div>
   <div id="progress-message" style="font-size:13px;color:var(--text-secondary);margin-bottom:10px;"></div>
   <div class="progress-bar"><div class="progress-bar-fill" id="progress-fill" style="width:0%;background:var(--accent);"></div></div>
-  <div id="progress-text" style="font-size:12px;color:var(--text-tertiary);"></div>
+  <div id="progress-text" style="font-size:12px;color:var(--text-muted);"></div>
 </div>
 {% endblock %}
 {% block scripts %}
@@ -60,11 +60,9 @@
 function toggleAllCourses(on) {
   document.querySelectorAll('#course-list input').forEach(c => c.checked = on);
 }
-
 function getSelected() {
   return [...document.querySelectorAll('#course-list input:checked')].map(c => c.value);
 }
-
 function getDownloadType() {
   const sub = document.getElementById('dl-submission').checked;
   const att = document.getElementById('dl-attachment').checked;
@@ -73,7 +71,6 @@ function getDownloadType() {
   if (att) return 'attachment';
   return 'none';
 }
-
 function startDownload() {
   const ids = getSelected();
   if (!ids.length) { flash('Отметьте хотя бы один курс', 'error'); return; }
@@ -89,7 +86,6 @@ function startDownload() {
     pollProgress();
   });
 }
-
 function pollProgress() {
   const card = document.getElementById('progress-card');
   const msg = document.getElementById('progress-message');

@@ -6,24 +6,24 @@
 
 <div class="grid-2">
   <div class="card">
-    <div class="card-title"><div class="card-title-dot"></div>Курсы <span style="color:var(--text-tertiary);font-weight:400;">({{ courses|length }})</span></div>
+    <div class="card-title"><div class="card-title-indicator"></div>Курсы <span style="color:var(--text-muted);font-weight:400;">({{ courses|length }})</span></div>
     {% if courses %}
     <ul class="check-list" id="course-list">
       {% for c in courses %}
       <li>
-        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ c.name }} <span style="color:var(--text-tertiary);font-size:11px;">#{{ c.id }}</span></span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ c.name }} <span style="color:var(--text-muted);font-size:11px;">#{{ c.id }}</span></span>
         <button class="btn btn-danger btn-sm" onclick="removeCourse('{{ c.id }}')">Удалить</button>
       </li>
       {% endfor %}
     </ul>
     {% else %}
-    <p style="color:var(--text-tertiary);font-size:13px;padding:8px 0;">Нет добавленных курсов</p>
+    <p style="color:var(--text-muted);font-size:13px;padding:8px 0;">Нет добавленных курсов</p>
     {% endif %}
     <a href="/add-course" class="btn btn-outline btn-sm" style="margin-top:14px;">Добавить курс</a>
   </div>
 
   <div class="card">
-    <div class="card-title"><div class="card-title-dot"></div>Аккаунт</div>
+    <div class="card-title"><div class="card-title-indicator"></div>Аккаунт</div>
     <button class="btn btn-outline btn-sm" onclick="document.getElementById('login-form').style.display='block'" style="margin-bottom:12px;">Изменить логин и пароль</button>
     <div id="login-form" style="display:none;">
       <div class="form-group">
@@ -40,8 +40,8 @@
   </div>
 </div>
 
-<div class="card" style="margin-top:16px;">
-  <div class="card-title"><div class="card-title-dot"></div>Прочее</div>
+<div class="card" style="margin-top:14px;">
+  <div class="card-title"><div class="card-title-indicator"></div>Прочее</div>
   <div style="display:flex;gap:8px;flex-wrap:wrap;">
     <button class="btn btn-outline btn-sm" onclick="clearLogs()">Очистить логи</button>
     <a href="/" class="btn btn-outline btn-sm">Успеваемость</a>
@@ -67,7 +67,7 @@ async function saveCredentials() {
 
 async function loginWithCaptchaManual() {
   const div = document.getElementById('captcha-login');
-  div.innerHTML = '<span style="color:var(--text-tertiary);font-size:13px;">Загружаю…</span>';
+  div.innerHTML = '<span style="color:var(--text-muted);font-size:13px;">Загружаю…</span>';
   try {
     const r = await fetch('/api/auth/captcha');
     const d = await r.json();
@@ -75,7 +75,7 @@ async function loginWithCaptchaManual() {
     div.innerHTML = '<div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:8px;">'
       + '<div style="font-size:13px;font-weight:600;margin-bottom:10px;">Ручной вход с капчей</div>'
       + '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">'
-      + '<img src="data:image/png;base64,' + d.captcha_b64 + '" style="height:44px;border-radius:4px;border:1px solid var(--border);background:#fff;">'
+      + '<img src="data:image/png;base64,' + d.captcha_b64 + '" style="height:44px;border-radius:6px;border:1px solid var(--border);background:#fff;">'
       + '<input type="text" id="manual-captcha" placeholder="Код" class="form-input" style="width:110px;padding:6px 10px;font-size:13px;">'
       + '<button class="btn btn-primary btn-sm" onclick="submitManualCaptcha()" style="padding:6px 12px;font-size:12px;">Войти</button>'
       + '</div>'
@@ -89,7 +89,7 @@ async function submitManualCaptcha() {
   const csrf = document.getElementById('manual-csrf').value;
   if (!captcha) return;
   const div = document.getElementById('captcha-login');
-  div.innerHTML = '<span style="color:var(--text-tertiary);">Проверяю…</span>';
+  div.innerHTML = '<span style="color:var(--text-muted);">Проверяю…</span>';
   try {
     const r = await fetch('/api/auth/login', {
       method: 'POST', headers: {'Content-Type':'application/json'},
