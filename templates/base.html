@@ -582,7 +582,7 @@ async function loginWithCaptcha() {
   banner.innerHTML = 'Проверяю…';
   try {
     const r = await fetch('/api/auth/login', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
       body: JSON.stringify({captcha, csrf_token: csrf}),
     });
     const d = await r.json();
@@ -592,6 +592,13 @@ async function loginWithCaptcha() {
 }
 
 document.addEventListener('DOMContentLoaded', checkAuth);
+
+// Fetch CSRF token early
+let csrfToken = '';
+fetch('/api/csrf-token')
+  .then(r => r.json())
+  .then(d => { csrfToken = d.csrf_token || ''; })
+  .catch(() => {});
 </script>
 {% block scripts %}{% endblock %}
 </body>

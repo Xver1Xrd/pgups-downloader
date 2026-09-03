@@ -385,14 +385,6 @@ class PgupsDownloader:
                         log("[✓] Вход через портал выполнен")
                         break
 
-                    log("[*] Запуск SSO через my.pgups.ru/auth/sdo…")
-                    sso_r = self.get(f"{MY_BASE_URL}/auth/sdo", timeout=15, allow_redirects=True)
-                    self._save_session_cookies()
-                    if self.verify_auth():
-                        success = True
-                        log("[✓] Вход через портал выполнен")
-                        break
-
                     log("[*] SSO не дал авторизации, пробуем принудительный переход")
                     try:
                         force_r = self.get(f"{BASE_URL}/my/", timeout=10, allow_redirects=True)

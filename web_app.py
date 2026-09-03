@@ -34,8 +34,14 @@ _rate_limit_window = 60
 _rate_limit_max = 30
 _request_log: dict[str, list[float]] = {}
 
+# CSRF protection
+_csrf_lock = threading.Lock()
+_csrf_tokens: dict[str, tuple[str, float]] = {}  # user_token -> (value, timestamp)
+CSRF_TTL = 3600  # 1 hour
+
 # Config cache to avoid repeated disk reads
 _config_cache = {"data": None, "time": 0, "ttl": 30}
+_config_cache_lock = threading.Lock()
 
 
 def _load_secret_key() -> bytes:
@@ -82,6 +88,31 @@ def _check_rate_limit() -> bool:
         return True
 
 
+def _generate_csrf_token() -> str:
+    """Generate a CSRF token for the current session."""
+    import secrets
+    token = secrets.token_hex(32)
+    now = time.time()
+    with _csrf_lock:
+        # Clean old tokens
+        _csrf_tokens = {k: v for k, v in _csrf_tokens.items() if now - v[1] < CSRF_TTL}
+    return token
+
+
+def _validate_csrf_token(token: str) -> bool:
+    """Validate a CSRF token."""
+    if not token:
+        return False
+    now = time.time()
+    with _csrf_lock:
+        # Clean old tokens
+        _csrf_tokens.update({k: v for k, v in _csrf_tokens.items() if now - v[1] < CSRF_TTL})
+        stored = _csrf_tokens.pop(token, None)
+        if stored is None:
+            return False
+        return now - stored[1] < CSRF_TTL
+
+
 def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -93,6 +124,12 @@ def require_auth(f):
         if not _check_rate_limit():
             from flask import make_response
             return make_response("Too many requests. Try again later.", 429)
+        # Validate CSRF for POST/PUT/DELETE requests
+        if request.method in ("POST", "PUT", "DELETE"):
+            csrf_token = request.headers.get("X-CSRF-Token") or request.form.get("csrf_token")
+            if not _validate_csrf_token(csrf_token):
+                from flask import make_response
+                return make_response("CSRF token invalid or expired", 403)
         return f(*args, **kwargs)
     return decorated
 
@@ -116,18 +153,28 @@ _auth_cache = {"authenticated": None, "time": 0}
 def _load_config_cached() -> dict:
     """Load config with 30-second cache to avoid repeated disk reads."""
     now = time.time()
-    if (
-        _config_cache["data"] is not None
-        and now - _config_cache["time"] < _config_cache["ttl"]
-    ):
-        return _config_cache["data"]
-    try:
-        data = load_config()
-        _config_cache["data"] = data
-        _config_cache["time"] = now
-        return data
-    except Exception:
-        return _config_cache["data"] or {}
+    with _config_cache_lock:
+        if (
+            _config_cache["data"] is not None
+            and now - _config_cache["time"] < _config_cache["ttl"]
+        ):
+            return _config_cache["data"]
+        try:
+            data = load_config()
+            _config_cache["data"] = data
+            _config_cache["time"] = now
+            return data
+        except Exception:
+            if _config_cache["data"] is None:
+                return {}
+            return _config_cache["data"]
+
+
+def invalidate_config_cache():
+    """Invalidate config cache (called after settings change)."""
+    with _config_cache_lock:
+        _config_cache["data"] = None
+        _config_cache["time"] = 0
 
 
 def get_creds() -> tuple[str, str]:
@@ -196,6 +243,13 @@ def add_cache_headers(response):
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
+
+
+@app.route("/api/csrf-token")
+def api_csrf_token():
+    """Generate and return a CSRF token for the client."""
+    token = _generate_csrf_token()
+    return jsonify({"csrf_token": token})
 
 
 @app.route("/api/auth/status")
@@ -486,8 +540,7 @@ def api_settings_login():
         cfg["password"] = password
     save_config(cfg)
     # Invalidate config cache
-    _config_cache["data"] = None
-    _config_cache["time"] = 0
+    invalidate_config_cache()
     log("[WEB] Логин/пароль сохранены")
     clear_courses_cache(_courses_cache)
     return jsonify({"status": "ok"})
@@ -546,21 +599,6 @@ def api_clear_logs():
         except OSError:
             pass
     return jsonify({"status": "ok"})
-
-
-def _preload_cache():
-    time.sleep(2)
-    try:
-        with courses_lock:
-            snapshot = list(dl.courses)
-        _do_refresh_courses(snapshot)
-        log("[WEB] Кэш предзагружен")
-    except Exception as e:
-        log(f"[WEB] Ошибка предзагрузки кэша: {e}")
-
-
-# Preload cache when module is imported (works for both direct run and --web)
-_preload_started = False
 
 
 def _preload_cache():

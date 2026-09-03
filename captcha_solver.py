@@ -1,8 +1,6 @@
-import io
 import cv2
 import numpy as np
 from collections import Counter
-from PIL import Image
 from threading import Lock
 import ddddocr
 from urllib.parse import urljoin
