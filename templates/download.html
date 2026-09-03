@@ -2,61 +2,67 @@
 {% block title %}Скачивание — PGUPS{% endblock %}
 {% block content %}
 <h1 class="page-title">Скачивание лабораторных</h1>
+<div class="page-subtitle">Выберите курсы и тип файлов для скачивания</div>
 
 <div class="card">
-  <div class="card-title">Выберите курсы</div>
+  <div class="card-title"><div class="card-title-dot"></div>Курсы</div>
   <div style="display:flex;flex-direction:column;gap:6px;">
     {% for c in courses %}
-    <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
-      <input type="checkbox" value="{{ c.id }}" style="width:16px;height:16px;cursor:pointer;">
+    <label style="display:flex;align-items:center;gap:10px;font-size:13px;cursor:pointer;padding:6px 8px;border-radius:var(--radius);transition:background .12s;" onmouseover="this.style.background='var(--bg-alt)'" onmouseout="this.style.background='transparent'">
+      <input type="checkbox" value="{{ c.id }}" style="width:15px;height:15px;cursor:pointer;accent-color:var(--accent);">
       <span>{{ c.name }}</span>
     </label>
     {% endfor %}
   </div>
-  <div style="margin-top:12px;">
-    <button class="btn btn-outline btn-sm" onclick="toggleAllCourses(true)">Выбрать все</button>
+  <div style="margin-top:14px;display:flex;gap:6px;">
+    <button class="btn btn-outline btn-sm" onclick="toggleAllCourses(true)">Выделить все</button>
     <button class="btn btn-outline btn-sm" onclick="toggleAllCourses(false)">Снять все</button>
   </div>
 </div>
 
-<div class="card" style="margin-top:16px;">
-  <div class="card-title">Что скачивать</div>
-  <div style="display:flex;gap:16px;">
-    <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
-      <input type="checkbox" id="dl-submission" checked style="width:16px;height:16px;cursor:pointer;">
-      Мои отправки
+<div class="card">
+  <div class="card-title"><div class="card-title-dot"></div>Тип файлов</div>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;">
+    <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;background:var(--surface);transition:all .12s;" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+      <input type="checkbox" id="dl-submission" checked style="width:15px;height:15px;cursor:pointer;accent-color:var(--accent);">
+      <span>Мои отправки — файлы, которые вы уже загрузили</span>
     </label>
-    <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
-      <input type="checkbox" id="dl-attachment" checked style="width:16px;height:16px;cursor:pointer;">
-      Задания
+    <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;background:var(--surface);transition:all .12s;" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+      <input type="checkbox" id="dl-attachment" checked style="width:15px;height:15px;cursor:pointer;accent-color:var(--accent);">
+      <span>Задания — условия и материалы от преподавателя</span>
     </label>
   </div>
 </div>
 
-<div class="card" style="margin-top:16px;">
-  <div class="form-group">
-    <label class="form-label" for="workers">Количество потоков</label>
-    <input type="number" id="workers" class="form-input" value="{{ default_workers }}" min="1" max="10" style="width:100px;">
+<div class="card">
+  <div class="card-title"><div class="card-title-dot"></div>Параметры</div>
+  <div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;">
+    <div style="min-width:180px;">
+      <label class="form-label" for="workers">Потоки скачивания</label>
+      <input type="number" id="workers" class="form-input" value="{{ default_workers }}" min="1" max="10" style="width:100px;">
+    </div>
+    <button class="btn btn-primary" onclick="startDownload()">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a.75.75 0 0 1 .75.75v8.39l2.28-2.28a.75.75 0 1 1 1.06 1.06l-3.5 3.5a.75.75 0 0 1-1.06 0l-3.5-3.5a.75.75 0 1 1 1.06-1.06L7.25 10.14V1.75A.75.75 0 0 1 8 1zM1.75 14.25a.75.75 0 0 1 .75.75H14a.75.75 0 0 1 0 1.5H2.5a.75.75 0 0 1-.75-.75z"/></svg>
+      Скачать
+    </button>
   </div>
-  <button class="btn btn-primary" onclick="startDownload()">Начать скачивание</button>
 </div>
 
-<div class="card" id="progress-card" style="display:none;margin-top:16px;">
-  <div class="card-title">Статус скачивания</div>
-  <div id="progress-message" style="font-size:14px;"></div>
-  <div class="progress-mini" style="margin:12px 0;"><div class="progress-mini-fill" id="progress-fill" style="width:0%"></div></div>
-  <div id="progress-text" style="font-size:12px;color:var(--text-secondary);"></div>
+<div class="card" id="progress-card" style="display:none;">
+  <div class="card-title"><div class="card-title-dot"></div>Ход скачивания</div>
+  <div id="progress-message" style="font-size:13px;color:var(--text-secondary);margin-bottom:10px;"></div>
+  <div class="progress-bar"><div class="progress-bar-fill" id="progress-fill" style="width:0%;background:var(--accent);"></div></div>
+  <div id="progress-text" style="font-size:12px;color:var(--text-tertiary);"></div>
 </div>
 {% endblock %}
 {% block scripts %}
 <script>
-function toggleAllCourses(checked) {
-  document.querySelectorAll('#course-list input').forEach(c => c.checked = checked);
+function toggleAllCourses(on) {
+  document.querySelectorAll('#course-list input').forEach(c => c.checked = on);
 }
 
 function getSelected() {
-  const checks = document.querySelectorAll('#course-list input:checked');
-  return Array.from(checks).map(c => c.value);
+  return [...document.querySelectorAll('#course-list input:checked')].map(c => c.value);
 }
 
 function getDownloadType() {
@@ -70,14 +76,13 @@ function getDownloadType() {
 
 function startDownload() {
   const ids = getSelected();
-  if (ids.length === 0) { flash('Выберите хотя бы один курс', 'error'); return; }
+  if (!ids.length) { flash('Отметьте хотя бы один курс', 'error'); return; }
   const dt = getDownloadType();
-  if (dt === 'none') { flash('Выберите тип скачивания', 'error'); return; }
-  const workers = document.getElementById('workers').value || 3;
+  if (dt === 'none') { flash('Выберите тип файлов', 'error'); return; }
+  const workers = parseInt(document.getElementById('workers').value) || 3;
   fetch('/api/download', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({course_ids: ids, workers: parseInt(workers), download_type: dt}),
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({course_ids: ids, workers, download_type: dt}),
   }).then(r => r.json()).then(d => {
     if (d.error) { flash(d.error, 'error'); return; }
     flash('Скачивание запущено', 'success');
@@ -96,12 +101,11 @@ function pollProgress() {
     const d = await r.json();
     msg.textContent = d.message;
     if (d.progress) {
-      const parts = d.progress.split('/');
-      const done = parseInt(parts[0]), total = parseInt(parts[1]);
-      fill.style.width = total > 0 ? Math.round(done/total*100) + '%' : '0%';
-      text.textContent = d.progress;
+      const [done, total] = d.progress.split('/').map(Number);
+      fill.style.width = total ? Math.round(done/total*100)+'%' : '0%';
+      text.textContent = d.progress + ' файлов';
     }
-    if (!d.running) { clearInterval(iv); }
+    if (!d.running) clearInterval(iv);
   }, 1000);
 }
 </script>

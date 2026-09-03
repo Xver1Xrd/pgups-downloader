@@ -2,24 +2,26 @@
 {% block title %}Добавить курс — PGUPS{% endblock %}
 {% block content %}
 <h1 class="page-title">Добавить курс</h1>
-<div class="card" style="max-width:500px;">
+<div class="page-subtitle">Введите ID курса или полный URL</div>
+
+<div class="card" style="max-width:480px;">
+  <div class="card-title"><div class="card-title-dot"></div>ID или URL</div>
   <div class="form-group">
-    <label class="form-label" for="url">URL курса или ID</label>
-    <input type="text" id="url" class="form-input" placeholder="Например: 6964 или sdo.pgups.ru/course/view.php?id=6964">
-    <div class="subtext">Можно ввести просто ID (число) или полный URL со страницы курса</div>
+    <input type="text" id="url" class="form-input" placeholder="Например: 6964">
+    <div class="form-hint">Можно ввести просто ID (число) или полную ссылку на страницу курса</div>
   </div>
-  <button class="btn btn-primary" onclick="addCourse()">Добавить курс</button>
+  <button class="btn btn-primary" onclick="addCourse()">Добавить</button>
 </div>
 {% endblock %}
 {% block scripts %}
 <script>
 async function addCourse() {
   const url = document.getElementById('url').value.trim();
-  if (!url) { flash('Введите ID или URL курса', 'error'); return; }
+  if (!url) { flash('Введите ID или URL', 'error'); return; }
   try {
     const r = await fetch('/api/settings/courses', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({url: url}),
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({url}),
     });
     const d = await r.json();
     if (d.error) { flash(d.error, 'error'); return; }

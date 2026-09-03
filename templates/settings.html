@@ -2,25 +2,30 @@
 {% block title %}Настройки — PGUPS{% endblock %}
 {% block content %}
 <h1 class="page-title">Настройки</h1>
+<div class="page-subtitle">Управление курсами и учётной записью</div>
 
 <div class="grid-2">
   <div class="card">
-    <div class="card-title">Курсы <span style="font-weight:400;font-size:13px;color:var(--text-secondary);">({{ courses|length }})</span></div>
+    <div class="card-title"><div class="card-title-dot"></div>Курсы <span style="color:var(--text-tertiary);font-weight:400;">({{ courses|length }})</span></div>
+    {% if courses %}
     <ul class="check-list" id="course-list">
       {% for c in courses %}
-      <li style="display:flex;justify-content:space-between;align-items:center;">
-        <span>{{ c.name }} <span style="color:var(--text-secondary);font-size:12px;">(id: {{ c.id }})</span></span>
+      <li>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ c.name }} <span style="color:var(--text-tertiary);font-size:11px;">#{{ c.id }}</span></span>
         <button class="btn btn-danger btn-sm" onclick="removeCourse('{{ c.id }}')">Удалить</button>
       </li>
       {% endfor %}
     </ul>
-    <a href="/add-course" class="btn btn-outline btn-sm" style="margin-top:10px;">Добавить курс</a>
+    {% else %}
+    <p style="color:var(--text-tertiary);font-size:13px;padding:8px 0;">Нет добавленных курсов</p>
+    {% endif %}
+    <a href="/add-course" class="btn btn-outline btn-sm" style="margin-top:14px;">Добавить курс</a>
   </div>
 
   <div class="card">
-    <div class="card-title">Аккаунт</div>
-    <button class="btn btn-outline btn-sm" onclick="showLoginForm()" style="margin-bottom:12px;">Сменить логин/пароль</button>
-    <div id="login-form" style="display:none;margin-bottom:12px;">
+    <div class="card-title"><div class="card-title-dot"></div>Аккаунт</div>
+    <button class="btn btn-outline btn-sm" onclick="document.getElementById('login-form').style.display='block'" style="margin-bottom:12px;">Изменить логин и пароль</button>
+    <div id="login-form" style="display:none;">
       <div class="form-group">
         <label class="form-label">Email</label>
         <input type="email" id="new-login" class="form-input" placeholder="Email" value="{{ login or '' }}">
@@ -31,12 +36,12 @@
       </div>
       <button class="btn btn-primary btn-sm" onclick="saveCredentials()">Сохранить</button>
     </div>
-    <div id="captcha-login" style="margin-top:8px;"></div>
+    <div id="captcha-login" style="margin-top:12px;"></div>
   </div>
 </div>
 
-<div class="card">
-  <div class="card-title">Прочее</div>
+<div class="card" style="margin-top:16px;">
+  <div class="card-title"><div class="card-title-dot"></div>Прочее</div>
   <div style="display:flex;gap:8px;flex-wrap:wrap;">
     <button class="btn btn-outline btn-sm" onclick="clearLogs()">Очистить логи</button>
     <a href="/" class="btn btn-outline btn-sm">Успеваемость</a>
@@ -46,10 +51,6 @@
 {% endblock %}
 {% block scripts %}
 <script>
-function showLoginForm() {
-  document.getElementById('login-form').style.display = 'block';
-}
-
 async function saveCredentials() {
   const login = document.getElementById('new-login').value.trim();
   const password = document.getElementById('new-password').value.trim();
@@ -58,28 +59,29 @@ async function saveCredentials() {
   if (password) body.password = password;
   if (!login && !password) return;
   await fetch('/api/settings/login', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
+    method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify(body),
   });
-  flash('Сохранено. Перезапустите сервер для применения.', 'success');
+  flash('Сохранено. Перезапустите сервер.', 'success');
 }
 
 async function loginWithCaptchaManual() {
   const div = document.getElementById('captcha-login');
-  div.innerHTML = 'Загрузка капчи…';
+  div.innerHTML = '<span style="color:var(--text-tertiary);font-size:13px;">Загружаю…</span>';
   try {
     const r = await fetch('/api/auth/captcha');
     const d = await r.json();
-    if (!d.captcha_b64) { div.innerHTML = 'Ошибка загрузки капчи'; return; }
-    div.innerHTML = '<div class="card" style="padding:14px;"><div class="card-title">Ручной вход с капчей</div>'
+    if (!d.captcha_b64) { div.innerHTML = '<span style="color:var(--danger);font-size:13px;">Ошибка загрузки капчи</span>'; return; }
+    div.innerHTML = '<div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:8px;">'
+      + '<div style="font-size:13px;font-weight:600;margin-bottom:10px;">Ручной вход с капчей</div>'
       + '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">'
-      + '<img src="data:image/png;base64,' + d.captcha_b64 + '" style="height:50px;border-radius:4px;background:#fff;">'
-      + '<input type="text" id="manual-captcha" placeholder="Код с картинки" class="form-input" style="width:120px;">'
-      + '<button class="btn btn-primary btn-sm" onclick="submitManualCaptcha()">Войти</button>'
+      + '<img src="data:image/png;base64,' + d.captcha_b64 + '" style="height:44px;border-radius:4px;border:1px solid var(--border);background:#fff;">'
+      + '<input type="text" id="manual-captcha" placeholder="Код" class="form-input" style="width:110px;padding:6px 10px;font-size:13px;">'
+      + '<button class="btn btn-primary btn-sm" onclick="submitManualCaptcha()" style="padding:6px 12px;font-size:12px;">Войти</button>'
       + '</div>'
       + '<input type="hidden" id="manual-csrf" value="' + d.csrf_token + '">'
       + '</div>';
-  } catch(e) { div.innerHTML = 'Ошибка загрузки капчи'; }
+  } catch(e) { div.innerHTML = '<span style="color:var(--danger);font-size:13px;">Ошибка</span>'; }
 }
 
 async function submitManualCaptcha() {
@@ -87,15 +89,15 @@ async function submitManualCaptcha() {
   const csrf = document.getElementById('manual-csrf').value;
   if (!captcha) return;
   const div = document.getElementById('captcha-login');
-  div.innerHTML = 'Авторизация…';
+  div.innerHTML = '<span style="color:var(--text-tertiary);">Проверяю…</span>';
   try {
     const r = await fetch('/api/auth/login', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({captcha, csrf_token: csrf}),
     });
     const d = await r.json();
     if (d.authenticated) { div.innerHTML = '<div class="msg msg-success">Вход выполнен!</div>'; }
-    else { div.innerHTML = '<div class="msg msg-error">Неверная капча. <a href="#" onclick="loginWithCaptchaManual();return false;">Попробовать снова</a></div>'; }
+    else { div.innerHTML = '<div class="msg msg-error">Неверная капча. <a href="#" onclick="loginWithCaptchaManual();return false;">Снова</a></div>'; }
   } catch(e) { div.innerHTML = '<div class="msg msg-error">Ошибка</div>'; }
 }
 
@@ -113,16 +115,14 @@ document.addEventListener('DOMContentLoaded', function() {
 function removeCourse(id) {
   if (!confirm('Удалить курс ' + id + '?')) return;
   fetch('/api/settings/courses', {
-    method: 'DELETE', headers: {'Content-Type': 'application/json'},
+    method: 'DELETE', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({id}),
-  }).then(r => r.json()).then(d => {
-    if (d.status === 'ok') { flash('Курс удалён', 'success'); setTimeout(() => location.reload(), 500); }
-  });
+  }).then(r => r.json()).then(d => { if (d.status==='ok') { flash('Удалён','success'); setTimeout(()=>location.reload(),400); } });
 }
 
 function clearLogs() {
   fetch('/api/settings/logs', {method: 'DELETE'})
-    .then(r => r.json()).then(d => { if (d.status === 'ok') flash('Логи очищены', 'success'); });
+    .then(r => r.json()).then(d => { if (d.status==='ok') flash('Логи очищены','success'); });
 }
 </script>
 {% endblock %}

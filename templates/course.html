@@ -2,14 +2,19 @@
 {% block title %}Курс — PGUPS{% endblock %}
 {% block content %}
 <h1 class="page-title" id="course-title">Загрузка…</h1>
-<div class="status-bar" id="status-bar">Загрузка…</div>
-<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
-  <button class="btn btn-primary btn-sm" onclick="downloadCourse()">Скачать этот курс</button>
-  <a href="/" class="btn btn-outline btn-sm">← На главную</a>
+<div class="status-bar" id="status-bar"></div>
+
+<div style="display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap;">
+  <button class="btn btn-primary btn-sm" onclick="downloadCourse()">
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a.75.75 0 0 1 .75.75v8.39l2.28-2.28a.75.75 0 1 1 1.06 1.06l-3.5 3.5a.75.75 0 0 1-1.06 0l-3.5-3.5a.75.75 0 1 1 1.06-1.06L7.25 10.14V1.75A.75.75 0 0 1 8 1zM1.75 14.25a.75.75 0 0 1 .75.75H14a.75.75 0 0 1 0 1.5H2.5a.75.75 0 0 1-.75-.75z"/></svg>
+    Скачать курс
+  </button>
+  <a href="/" class="btn btn-outline btn-sm">← Назад</a>
 </div>
+
 <div class="card">
-  <div class="stats" id="stats"></div>
-  <div class="item-list" id="item-list"></div>
+  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;" id="stats"></div>
+  <div id="item-list"></div>
 </div>
 {% endblock %}
 {% block scripts %}
@@ -20,45 +25,48 @@ let prevItems = {};
 function render(data) {
   document.getElementById('course-title').textContent = data.name;
   document.getElementById('stats').innerHTML = `
-    <span class="stat stat-ok">✅ ${data.passed}</span>
-    <span class="stat stat-fail">❌ ${data.failed}</span>
-    <span class="stat stat-sub">📤 ${data.submitted}</span>
-    <span class="stat stat-lock">🔒 ${data.locked}</span>
-    <span class="stat stat-pend">⏳ ${data.pending}</span>
+    <span class="stat stat-ok">${ICONS['+']}${data.passed} сдано</span>
+    <span class="stat stat-fail">${ICONS['-']}${data.failed} не сдано</span>
+    <span class="stat stat-sub">${ICONS['~']}${data.submitted} на проверке</span>
+    <span class="stat stat-lock">${ICONS['#']}${data.locked} заблокировано</span>
+    <span class="stat stat-pend">${ICONS['.']}${data.pending} ожидают</span>
   `;
   const list = document.getElementById('item-list');
-  list.innerHTML = (data.items || []).map(i => {
+  list.innerHTML = (data.items||[]).map(i => {
     const old = prevItems[i.name];
     const changed = old && old !== i.status;
-    const cls = changed ? 'item-row changed' : 'item-row';
-    const prevHtml = changed ? `<span class="item-prev">← ${old}</span>` : '';
+    const prev = changed ? `<span class="item-prev">←${old}</span>` : '';
     if (!prevItems[i.name]) prevItems[i.name] = i.status;
     else if (changed) prevItems[i.name] = i.status;
-    return `<div class="${cls}"><span class="item-name">${i.name}</span><span class="item-status">${i.status}${prevHtml}</span></div>`;
-  }).join('');
+    return `<div class="item-row${changed?' changed':''}">
+      <span class="item-name">${i.name}</span>
+      <span class="item-status">${i.status}${prev}</span>
+    </div>`;
+  }).join('') || '<div style="color:var(--text-tertiary);font-size:13px;padding:12px 0;">Нет заданий</div>';
 }
 
 function downloadCourse() {
   fetch('/api/download', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({course_ids: [courseId]}),
-  }).then(r => r.json()).then(d => {
-    if (d.error) flash(d.error, 'error');
-    else flash('Скачивание запущено', 'success');
-  });
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({course_ids:[courseId]}),
+  }).then(r => r.json()).then(d => { d.error ? flash(d.error,'error') : flash('Запущено','success'); });
 }
 
+const ICONS = {'+':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>',
+'-':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M4.22 4.22a.75.75 0 0 1 1.06 0L8 6.94l2.72-2.72a.75.75 0 1 1 1.06 1.06L9.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L8 9.06l-2.72 2.72a.75.75 0 0 1-1.06-1.06L6.94 8 4.22 5.28a.75.75 0 0 1 0-1.06z"/></svg>',
+'~':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M8 1a.75.75 0 0 1 .75.75v9.69l2.72-2.72a.75.75 0 1 1 1.06 1.06l-4 4a.75.75 0 0 1-1.06 0l-4-4a.75.75 0 0 1 1.06-1.06l2.72 2.72V1.75A.75.75 0 0 1 8 1z"/></svg>',
+'#':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M8 1a4 4 0 0 0-4 4v2H3a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1h-1V5a4 4 0 0 0-4-4zm2 6V5a2 2 0 1 0-4 0v2h4z"/></svg>',
+'.':'<svg viewBox="0 0 16 16" fill="currentColor" width="11" height="11"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 12.5A5.5 5.5 0 1 1 8 2.5a5.5 5.5 0 0 1 0 11z"/><path d="M8 4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 8 4z"/></svg>'};
+
 async function fetchData() {
-  const bar = document.getElementById('status-bar');
   try {
     const r = await fetch(`/api/course/${courseId}`);
     const data = await r.json();
-    if (data.error) { document.getElementById('course-title').textContent = 'Ошибка'; bar.textContent = data.error; return; }
+    if (data.error) { document.getElementById('course-title').textContent = 'Ошибка'; return; }
     render(data);
-    bar.textContent = 'Обновлено: ' + new Date().toLocaleTimeString('ru-RU');
-  } catch(e) { bar.textContent = 'Ошибка обновления'; }
+  } catch(e) {}
 }
-setInterval(fetchData, 15000);
 fetchData();
+setInterval(fetchData, 15000);
 </script>
 {% endblock %}
