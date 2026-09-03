@@ -4,22 +4,26 @@ import re
 import sys
 import json
 import time
-import requests
+import subprocess
+import hashlib
 from pathlib import Path
 from urllib.parse import urljoin, unquote
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
+import requests
 from captcha_solver import auto_solve_captcha, solve_one_captcha, get_csrf_and_captcha
 
 BASE_URL = "https://sdo.pgups.ru"
 MY_BASE_URL = "https://my.pgups.ru"
 CONFIG_FILE = Path(__file__).parent / "config.json"
 COOKIES_FILE = Path(__file__).parent / "cookies.txt"
-DOWNLOAD_BASE = Path.home() / "Downloads" / "pgups"
+DOWNLOAD_BASE = Path.home() / "Документы" / "pgups"
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_FILE = LOG_DIR / "pgups.log"
 DEFAULT_WORKERS = 3
+MAX_RETRIES = 3
+RETRY_DELAY = 3
 
 log_lock = Lock()
 
@@ -28,8 +32,11 @@ def log(msg: str):
     with log_lock:
         print(msg)
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(msg + "\n")
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+        except OSError:
+            pass
 
 
 def sanitize(name: str, strip_задание: bool = False) -> str:
@@ -37,80 +44,157 @@ def sanitize(name: str, strip_задание: bool = False) -> str:
     if strip_задание:
         name = re.sub(r"\s*Задание\s*$", "", name, flags=re.IGNORECASE)
     name = re.sub(r'[\\/:*?"<>|]', " ", name)
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name)
     name = re.sub(r"\s+", " ", name).strip()
     name = name.rstrip(". ")
+    if len(name) > 200:
+        name = name[:200]
     return name or "untitled"
 
 
 def load_config() -> dict:
-    if CONFIG_FILE.exists():
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             return json.load(f)
-    return {}
+    except (json.JSONDecodeError, ValueError) as e:
+        log(f"[!] Ошибка чтения config.json: {e}")
+        return {}
 
 
 def save_config(cfg: dict):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+    except OSError as e:
+        log(f"[!] Ошибка записи config.json: {e}")
 
 
 class PgupsDownloader:
-    def __init__(self):
+    def __init__(self, courses: list[dict] | None = None):
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": (
                 "Mozilla/5.0 (X11; Linux x86_64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0.0.0 Safari/537.36"
-            )
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         })
         self.config = load_config()
-        self.courses = self.config.get("courses", [
-            {"id": "4388", "url": f"{BASE_URL}/course/view.php?id=4388"},
-            {"id": "7036", "url": f"{BASE_URL}/course/view.php?id=7036"},
-            {"id": "7031", "url": f"{BASE_URL}/course/view.php?id=7031"},
-            {"id": "6920", "url": f"{BASE_URL}/course/view.php?id=6920"},
-            {"id": "6467", "url": f"{BASE_URL}/course/view.php?id=6467"},
-            {"id": "6964", "url": f"{BASE_URL}/course/view.php?id=6964"},
-            {"id": "7039", "url": f"{BASE_URL}/course/view.php?id=7039"},
-            {"id": "7009", "url": f"{BASE_URL}/course/view.php?id=7009"},
-        ])
+        default_courses = self.config.get("courses")
+        if default_courses:
+            self.courses = default_courses
+        else:
+            self.courses = [
+                {"id": "4388", "url": f"{BASE_URL}/course/view.php?id=4388"},
+                {"id": "7036", "url": f"{BASE_URL}/course/view.php?id=7036"},
+                {"id": "7031", "url": f"{BASE_URL}/course/view.php?id=7031"},
+                {"id": "6920", "url": f"{BASE_URL}/course/view.php?id=6920"},
+                {"id": "6467", "url": f"{BASE_URL}/course/view.php?id=6467"},
+                {"id": "6964", "url": f"{BASE_URL}/course/view.php?id=6964"},
+                {"id": "7039", "url": f"{BASE_URL}/course/view.php?id=7039"},
+                {"id": "7009", "url": f"{BASE_URL}/course/view.php?id=7009"},
+            ]
+        if courses:
+            self.courses = courses
         self.workers = DEFAULT_WORKERS
+
+        # Load cookies on init so session is ready
+        self.load_cookies()
+
+        adapter = requests.adapters.HTTPAdapter(
+            max_retries=requests.adapters.Retry(
+                total=3,
+                backoff_factor=1,
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["GET", "POST"],
+            ),
+            pool_connections=10,
+            pool_maxsize=10,
+            pool_block=False,
+        )
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
+    def _request_with_retry(self, method: str, url: str, max_retries: int = MAX_RETRIES, **kwargs) -> requests.Response:
+        last_err = None
+        for attempt in range(max_retries):
+            try:
+                r = self.session.request(method, url, timeout=kwargs.pop("timeout", 15), **{k: v for k, v in kwargs.items() if k != "stream"})
+                if r.status_code == 429:
+                    wait = RETRY_DELAY * (attempt + 1)
+                    log(f"[!] 429 Too Many Requests, ждём {wait}с")
+                    time.sleep(wait)
+                    continue
+                return r
+            except requests.exceptions.RequestException as e:
+                last_err = e
+                log(f"[!] Запрос {method} {url} (попытка {attempt + 1}/{max_retries}) упал: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(RETRY_DELAY * (attempt + 1))
+        raise last_err
+
+    def get(self, url: str, **kwargs) -> requests.Response:
+        return self._request_with_retry("GET", url, **kwargs)
+
+    def post(self, url: str, **kwargs) -> requests.Response:
+        return self._request_with_retry("POST", url, **kwargs)
 
     def load_cookies(self) -> bool:
         if not COOKIES_FILE.exists():
+            log("[DEBUG] cookies.txt not found")
             return False
         count = 0
         moodle_found = False
-        with open(COOKIES_FILE) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split("\t")
-                if len(parts) >= 7:
-                    domain, _, path, secure, expires, name, value = parts[:7]
-                    self.session.cookies.set(name, value, domain=domain, path=path)
-                    count += 1
-                    if "sdo.pgups.ru" in domain and name == "MoodleSession":
-                        moodle_found = True
-        log(f"[*] Загружено {count} cookies")
+        try:
+            with open(COOKIES_FILE, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) >= 7:
+                        domain, _, path, secure, expires, name, value = parts[:7]
+                        self.session.cookies.set(name, value, domain=domain, path=path)
+                        count += 1
+                        if "sdo.pgups.ru" in domain and name == "MoodleSession":
+                            moodle_found = True
+                            log(f"[DEBUG] Loaded MoodleSession cookie for {domain}")
+                        elif "sdo.pgups.ru" in domain:
+                            log(f"[DEBUG] Loaded cookie {name} for {domain}")
+        except (OSError, UnicodeDecodeError) as e:
+            log(f"[!] Ошибка чтения cookies.txt: {e}")
+            return False
+        log(f"[*] Загружено {count} cookies, MoodleSession: {moodle_found}")
         return moodle_found
 
     def verify_auth(self) -> bool:
         try:
-            r = self.session.get(f"{BASE_URL}/my/", timeout=10, allow_redirects=True)
-            if "login" in r.url.lower():
+            r = self.get(f"{BASE_URL}/my/", timeout=10)
+            login_in_url = "login" in r.url.lower()
+            guest_in_text = "Гость" in r.text or "гостевой доступ" in r.text.lower()
+            log(f"[DEBUG] verify_auth: url={r.url}, has_login={login_in_url}, has_guest={guest_in_text}")
+            if login_in_url:
+                log(f"[DEBUG]  → перенаправлен на логин")
                 return False
-            if "Гость" in r.text or "гостевой доступ" in r.text.lower():
+            if guest_in_text:
+                log(f"[DEBUG]  → гостевой доступ")
                 return False
+            log(f"[DEBUG]  → авторизован")
             return True
-        except Exception:
+        except Exception as e:
+            log(f"[DEBUG] verify_auth error: {e}")
             return False
 
     def login(self, username: str, password: str) -> bool:
         log("[*] Попытка входа…")
-        r = self.session.get(f"{BASE_URL}/login/index.php", timeout=10)
+        try:
+            r = self.get(f"{BASE_URL}/login/index.php", timeout=10)
+        except Exception:
+            return False
         soup = BeautifulSoup(r.text, "html.parser")
         form = soup.find("form")
         if not form:
@@ -127,7 +211,10 @@ class PgupsDownloader:
         data["username"] = username
         data["password"] = password
 
-        r = self.session.post(post_url, data=data, allow_redirects=True)
+        try:
+            r = self.post(post_url, data=data, allow_redirects=True)
+        except Exception:
+            return False
 
         if "2fa" in r.url.lower() or "otp" in r.url.lower() or "code" in r.url.lower():
             code = input("[?] Введите код 2FA из почты: ").strip()
@@ -142,7 +229,10 @@ class PgupsDownloader:
                     if name:
                         data[name] = inp.get("value", "")
                 data["code"] = code
-                r = self.session.post(post_url, data=data, allow_redirects=True)
+                try:
+                    r = self.post(post_url, data=data, allow_redirects=True)
+                except Exception:
+                    return False
 
         ok = self.verify_auth()
         log("[✓] Вход выполнен" if ok else "[✗] Ошибка входа")
@@ -167,13 +257,16 @@ class PgupsDownloader:
             secure = "TRUE" if cookie.secure else "FALSE"
             expires = str(int(cookie.expires)) if cookie.expires else str(now_ts)
             lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{cookie.name}\t{cookie.value}")
-        with open(COOKIES_FILE, "w") as f:
-            f.write("\n".join(lines) + "\n")
-        log(f"[*] Сохранено {len(seen)} cookies")
+        try:
+            with open(COOKIES_FILE, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            log(f"[*] Сохранено {len(seen)} cookies")
+        except OSError as e:
+            log(f"[!] Ошибка сохранения cookies: {e}")
 
     def get_captcha(self) -> dict | None:
         try:
-            r = self.session.get(f"{MY_BASE_URL}/login", timeout=15)
+            r = self.get(f"{MY_BASE_URL}/login", timeout=15)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
             form = soup.find("form")
@@ -185,12 +278,12 @@ class PgupsDownloader:
                 return None
             csrf_token = token_input.get("value", "")
 
-            captcha_img = soup.find("img", alt=lambda a: a and "captcha" in a.lower()) if soup else None
+            captcha_img = soup.find("img", alt=lambda a: a and "captcha" in a.lower())
             captcha_url = urljoin(MY_BASE_URL, captcha_img.get("src", "")) if captcha_img else ""
 
             captcha_data = b""
             if captcha_url:
-                r_img = self.session.get(captcha_url, timeout=15)
+                r_img = self.get(captcha_url, timeout=15)
                 if r_img.status_code == 200:
                     captcha_data = r_img.content
 
@@ -204,8 +297,9 @@ class PgupsDownloader:
             log(f"[!] get_captcha error: {e}")
             return None
 
-    def login_via_portal(self, email: str, password: str, captcha: str = "", remember: bool = True) -> bool:
+    def login_via_portal(self, email: str, password: str, captcha: str = "", remember: bool = True, csrf_token: str = "") -> bool:
         old_cookies = list(self.session.cookies)
+        success = False
 
         for attempt in range(8 if not captcha else 1):
             try:
@@ -219,17 +313,20 @@ class PgupsDownloader:
                     if not captcha_text:
                         continue
                 else:
-                    r = self.session.get(f"{MY_BASE_URL}/login", timeout=15)
-                    soup = BeautifulSoup(r.text, "html.parser")
-                    form = soup.find("form")
-                    if not form:
-                        log("[!] Форма входа на my.pgups.ru не найдена")
-                        return False
-                    token_input = form.find("input", {"name": "_token"})
-                    if not token_input:
-                        log("[!] CSRF токен не найден")
-                        return False
-                    csrf_token = token_input.get("value", "")
+                    if not csrf_token:
+                        r = self.get(f"{MY_BASE_URL}/login", timeout=15)
+                        soup = BeautifulSoup(r.text, "html.parser")
+                        form = soup.find("form")
+                        if not form:
+                            log("[!] Форма входа на my.pgups.ru не найдена")
+                            self._restore_cookies(old_cookies)
+                            return False
+                        token_input = form.find("input", {"name": "_token"})
+                        if not token_input:
+                            log("[!] CSRF токен не найден")
+                            self._restore_cookies(old_cookies)
+                            return False
+                        csrf_token = token_input.get("value", "")
                     captcha_text = captcha
 
                 data = {
@@ -241,7 +338,7 @@ class PgupsDownloader:
                 }
 
                 log(f"[*] Отправка формы входа на my.pgups.ru (капча: {captcha_text})…")
-                r2 = self.session.post(
+                r2 = self.post(
                     f"{MY_BASE_URL}/login",
                     data=data,
                     allow_redirects=True,
@@ -251,16 +348,35 @@ class PgupsDownloader:
                 is_success = (
                     "/captcha" not in r2.url.lower()
                     and "/login" not in r2.url.lower()
+                    and "/verify" not in r2.url.lower()
                 )
+                if not is_success and ("/verify" in r2.url.lower() or "/captcha" in r2.url.lower()):
+                    log(f"[✗] Капча неверна, редирект на /verify — пробуем снова")
                 if is_success:
                     log(f"[*] Редирект на: {r2.url}")
                     self._save_session_cookies()
+                    log(f"[DEBUG] cookies после входа: {[(c.name, c.domain) for c in self.session.cookies]}")
                     log("[*] Запуск SSO через my.pgups.ru/auth/sdo…")
-                    self.session.get(f"{MY_BASE_URL}/auth/sdo", timeout=15, allow_redirects=True)
+                    sso_r = self.get(f"{MY_BASE_URL}/auth/sdo", timeout=15, allow_redirects=True)
+                    log(f"[DEBUG] SSO response: url={sso_r.url}, status={sso_r.status_code}")
+                    log(f"[DEBUG] cookies после SSO: {[(c.name, c.domain) for c in self.session.cookies]}")
                     self._save_session_cookies()
+                    log(f"[DEBUG] cookies после сохранения: {[(c.name, c.domain) for c in self.session.cookies]}")
                     if self.verify_auth():
+                        success = True
                         log("[✓] Вход через портал выполнен")
-                        return True
+                        break
+
+                    log(f"[DEBUG] verify_auth упал, пробуем принудительный переход на sdo.pgups.ru")
+                    try:
+                        force_r = self.get(f"{BASE_URL}/my/", timeout=10, allow_redirects=True)
+                        log(f"[DEBUG] Принудительный переход: url={force_r.url}")
+                        if self.verify_auth():
+                            success = True
+                            log("[✓] Вход через портал выполнен (принудительно)")
+                            break
+                    except Exception as e2:
+                        log(f"[DEBUG] Принудительный переход не удался: {e2}")
 
                 log(f"[✗] Попытка {attempt + 1} не удалась")
                 if not captcha:
@@ -270,16 +386,22 @@ class PgupsDownloader:
                 if not captcha:
                     captcha = ""
 
-        if not captcha:
+        if not success and not captcha:
             log("[!] Авто-капча не удалась после 8 попыток")
+        self._restore_cookies(old_cookies)
+        return success
+
+    def _restore_cookies(self, old_cookies: list):
+        try:
             for c in old_cookies:
                 self.session.cookies.set(c.name, c.value, domain=c.domain, path=c.path)
-        return False
+        except Exception:
+            pass
 
     def get_course_name(self, course_url: str) -> str:
         fallback = f"Курс {course_url.split('=')[-1]}"
         try:
-            r = self.session.get(course_url, timeout=10)
+            r = self.get(course_url, timeout=10)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
 
@@ -320,7 +442,7 @@ class PgupsDownloader:
             return fallback
 
     def get_assignments_from_course(self, course_url: str) -> list[dict]:
-        r = self.session.get(course_url, timeout=10)
+        r = self.get(course_url, timeout=10)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         assignments = []
@@ -343,7 +465,7 @@ class PgupsDownloader:
         return assignments
 
     def get_submission_files(self, assign_url: str) -> list[dict]:
-        r = self.session.get(assign_url, timeout=10)
+        r = self.get(assign_url, timeout=10)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         files = []
@@ -356,64 +478,109 @@ class PgupsDownloader:
                     continue
                 seen_urls.add(full_url)
                 filename = unquote(full_url.split("/")[-1].split("?")[0])
-                files.append({"url": full_url, "filename": filename})
+                files.append({"url": full_url, "filename": filename, "type": "submission"})
         return files
 
-    def check_remote_size(self, url: str) -> int | None:
+    def get_attachment_files(self, assign_url: str) -> list[dict]:
+        r = self.get(assign_url, timeout=10)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        files = []
+        seen_urls = set()
+        for link in soup.find_all("a", href=True):
+            href = link["href"]
+            if "pluginfile.php" in href and "attachment" in href:
+                full_url = href if href.startswith("http") else urljoin(BASE_URL, href)
+                if full_url in seen_urls:
+                    continue
+                seen_urls.add(full_url)
+                filename = unquote(full_url.split("/")[-1].split("?")[0])
+                if filename:
+                    files.append({"url": full_url, "filename": filename, "type": "attachment"})
+        return files
+
+    def check_remote_size(self, url: str) -> tuple[int | None, str | None]:
+        """Возвращает (размер, etag/md5), если сервер поддерживает."""
         try:
-            r = self.session.head(url, timeout=10, allow_redirects=True)
+            r = self.get(url, timeout=10, method="HEAD")
             if r.status_code == 200:
-                ct = r.headers.get("Content-Length")
-                if ct:
-                    return int(ct)
+                size = r.headers.get("Content-Length")
+                etag = r.headers.get("ETag")
+                if size:
+                    return int(size), etag
         except Exception:
             pass
-        return None
+        return None, None
 
-    def download_file(self, url: str, filename: str, folder: Path) -> bool:
+    def compute_local_hash(self, filepath: Path) -> str | None:
+        try:
+            h = hashlib.sha256()
+            with open(filepath, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except OSError:
+            return None
+
+    def download_file(self, url: str, filename: str, folder: Path, max_retries: int = MAX_RETRIES) -> bool:
         folder.mkdir(parents=True, exist_ok=True)
         filepath = folder / filename
 
-        remote_size = self.check_remote_size(url)
+        for attempt in range(max_retries):
+            tmp_path = None
+            try:
+                remote_size, remote_etag = self.check_remote_size(url)
 
-        if remote_size is not None and filepath.exists():
-            if filepath.stat().st_size == remote_size:
-                return False
-            log(f"  ↻ {filename} (обновлён на сервере)")
+                if remote_size is not None and remote_etag is None:
+                    if filepath.exists() and filepath.stat().st_size == remote_size:
+                        return False
 
-        log(f"  ↓ {filename}")
-        try:
-            r = self.session.get(url, stream=True, timeout=120)
-            r.raise_for_status()
-            path = filepath
-            tmp = folder / f".{filename}.part"
-            with open(tmp, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            new_size = tmp.stat().st_size
+                log(f"  ↓ {filename}")
+                r = self.get(url, stream=True, timeout=120)
+                r.raise_for_status()
 
-            for existing in folder.iterdir():
-                if existing.name.endswith(".part"):
-                    continue
-                if existing.is_file() and existing.stat().st_size == new_size and existing.name != path.name:
-                    tmp.unlink()
-                    log(f"     уже есть: {existing.name}")
-                    return False
+                tmp_path = folder / f".{filename}.part"
+                with open(tmp_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
 
-            updated = path.exists()
-            if updated:
-                path.unlink()
-            tmp.rename(path)
-            icon = "↻" if updated else "✓"
-            log(f"    {icon} {new_size/1024:.1f} KB")
-            return True
-        except Exception as e:
-            log(f"    ✗ ошибка: {e}")
-            return False
+                new_size = tmp_path.stat().st_size
+                local_hash = self.compute_local_hash(tmp_path)
+
+                for existing in folder.iterdir():
+                    if existing.name.endswith(".part") or not existing.is_file():
+                        continue
+                    if existing.name != filepath.name:
+                        existing_hash = self.compute_local_hash(existing)
+                        if existing_hash and local_hash and existing_hash == local_hash:
+                            tmp_path.unlink()
+                            log(f"     уже есть: {existing.name}")
+                            return False
+
+                updated = filepath.exists()
+                if updated:
+                    filepath.unlink()
+                tmp_path.rename(filepath)
+                icon = "↻" if updated else "✓"
+                log(f"    {icon} {new_size / 1024:.1f} KB")
+                return True
+
+            except Exception as e:
+                log(f"    ✗ попытка {attempt + 1}/{max_retries} ошибка: {e}")
+                if tmp_path and tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+                if attempt < max_retries - 1:
+                    time.sleep(RETRY_DELAY * (attempt + 1))
+
+        log(f"    ✗ не удалось скачать {filename} после {max_retries} попыток")
+        return False
 
     def _check_submission_and_deadline(self, assign_url: str) -> tuple[bool, str | None]:
         try:
-            r = self.session.get(assign_url, timeout=10)
+            r = self.get(assign_url, timeout=10)
             if r.status_code != 200:
                 return False, None
             soup = BeautifulSoup(r.text, "html.parser")
@@ -440,7 +607,7 @@ class PgupsDownloader:
 
     def get_deadline(self, url: str) -> str | None:
         try:
-            r = self.session.get(url, timeout=6)
+            r = self.get(url, timeout=6)
             if r.status_code != 200:
                 return None
             soup = BeautifulSoup(r.text, "html.parser")
@@ -456,24 +623,32 @@ class PgupsDownloader:
         except Exception:
             return None
 
-    def check_course(self, course_url: str) -> list[dict]:
+    def check_course(self, course_url: str) -> tuple[list[dict], str]:
         course_id = course_url.split("=")[-1]
         course_name = self.get_course_name(course_url)
 
         locked_ids = set()
-        r2 = self.session.get(course_url, timeout=10)
-        soup2 = BeautifulSoup(r2.text, "html.parser")
-        for act in soup2.find_all("li", class_="activity"):
-            info = act.find("div", class_="availabilityinfo")
-            if info and "Недоступно" in info.get_text():
-                cm_id = act.get("data-id")
-                iname = act.find("span", class_="instancename")
-                locked_ids.add((cm_id, iname.get_text(strip=True) if iname else ""))
+        try:
+            r2 = self.get(course_url, timeout=10)
+            soup2 = BeautifulSoup(r2.text, "html.parser")
+            for act in soup2.find_all("li", class_="activity"):
+                info = act.find("div", class_="availabilityinfo")
+                if info and "Недоступно" in info.get_text():
+                    cm_id = act.get("data-id")
+                    iname = act.find("span", class_="instancename")
+                    locked_ids.add((cm_id, iname.get_text(strip=True) if iname else ""))
+        except Exception:
+            pass
 
-        r = self.session.get(
-            f"{BASE_URL}/grade/report/user/index.php?id={course_id}", timeout=10
-        )
-        r.raise_for_status()
+        try:
+            r = self.get(
+                f"{BASE_URL}/grade/report/user/index.php?id={course_id}", timeout=10
+            )
+            r.raise_for_status()
+        except Exception as e:
+            log(f"[!] Ошибка загрузки grades: {e}")
+            return [], course_name
+
         soup = BeautifulSoup(r.text, "html.parser")
 
         table = soup.find("table", class_="generaltable")
@@ -609,48 +784,57 @@ class PgupsDownloader:
         prev: dict[str, str] = {}
         first = True
 
-        while True:
-            results, _ = self.check_course(course_url)
-            curr = fmt(results)
-            timestamp = time.strftime("%H:%M:%S")
+        try:
+            while True:
+                results, _ = self.check_course(course_url)
+                curr = fmt(results)
+                timestamp = time.strftime("%H:%M:%S")
 
-            if first:
-                os.system("clear" if os.name == "posix" else "cls")
-                log(f"\n📡 Мониторинг: {course_name} (id={course_id})")
-                log(f"   Интервал: {interval}с | Выход: Ctrl+C\n")
-                for r in results:
-                    log(f"  {r['status']}  {r['name']}")
-                prev = curr
-                first = False
-            elif curr != prev:
-                os.system("clear" if os.name == "posix" else "cls")
-                log(f"\n📡 Мониторинг: {course_name} (id={course_id})")
-                log(f"   Интервал: {interval}с | Выход: Ctrl+C\n")
-                for r in results:
-                    old = prev.get(r["name"])
-                    if old and old != r["status"]:
-                        log(f"  {r['status']}  {r['name']}  ← {old}")
-                    else:
+                if first:
+                    self._clear_screen()
+                    log(f"\n📡 Мониторинг: {course_name} (id={course_id})")
+                    log(f"   Интервал: {interval}с | Выход: Ctrl+C\n")
+                    for r in results:
                         log(f"  {r['status']}  {r['name']}")
-                prev = curr
-            else:
-                log(f"[{timestamp}] Нет изменений")
+                    prev = curr
+                    first = False
+                elif curr != prev:
+                    self._clear_screen()
+                    log(f"\n📡 Мониторинг: {course_name} (id={course_id})")
+                    log(f"   Интервал: {interval}с | Выход: Ctrl+C\n")
+                    for r in results:
+                        old = prev.get(r["name"])
+                        if old and old != r["status"]:
+                            log(f"  {r['status']}  {r['name']}  ← {old}")
+                        else:
+                            log(f"  {r['status']}  {r['name']}")
+                    prev = curr
+                else:
+                    log(f"[{timestamp}] Нет изменений")
 
-            time.sleep(interval)
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            log("\n[*] Мониторинг остановлен")
+
+    def _clear_screen(self):
+        try:
+            subprocess.run(["clear"], check=False, shell=(os.name != "posix"))
+        except Exception:
+            pass
 
     def watch(self, course_url: str | None = None, interval: int = 30):
         if not self.ensure_auth("", ""):
+            log("[!] Невозможно запустить мониторинг: нет авторизации")
             return
         if course_url:
-            try:
-                self.monitor_course(course_url, interval)
-            except KeyboardInterrupt:
-                log("\n[*] Мониторинг остановлен")
+            self.monitor_course(course_url, interval)
         else:
             log("[!] Укажи ID курса: --course ID")
 
     def ensure_auth(self, username: str = "", password: str = "") -> bool:
-        if self.load_cookies() and self.verify_auth():
+        log(f"[DEBUG] ensure_auth called, username='{username[:10] if username else ''}...'")
+        if self.verify_auth():
+            log(f"[DEBUG] Auth OK from cookies")
             return True
 
         log("[*] Сессия истекла, пробую восстановить…")
@@ -660,15 +844,17 @@ class PgupsDownloader:
             password = self.config.get("password", "")
 
         if username and password:
+            log(f"[DEBUG] Trying login with saved credentials")
             if self.login(username, password):
                 return True
             log("[*] Пробую вход через портал с авто-капчей…")
-            return self.login_via_portal(username, password)
+            if self.login_via_portal(username, password):
+                return True
 
         log("[!] Нужна авторизация. Укажи --login / --pass или сохрани в config.json")
         return False
 
-    def collect_tasks(self) -> list[tuple]:
+    def collect_tasks(self, download_type: str = "both") -> list[tuple]:
         tasks = []
         for course in self.courses:
             course_name = self.get_course_name(course["url"])
@@ -686,14 +872,21 @@ class PgupsDownloader:
                 assign_name = sanitize(assign["name"], strip_задание=True)
                 assign_folder = course_folder / assign_name if assign_name else course_folder
 
-                files = self.get_submission_files(assign["url"])
-                if not files:
-                    continue
-                log(f"  • {assign_name} ({len(files)})")
+                if download_type in ("submission", "both"):
+                    files = self.get_submission_files(assign["url"])
+                    if files:
+                        log(f"  • {assign_name} ({len(files)} отправка)")
+                        course_count += len(files)
+                        for f in files:
+                            tasks.append((f["url"], f["filename"], assign_folder))
 
-                course_count += len(files)
-                for f in files:
-                    tasks.append((f["url"], f["filename"], assign_folder))
+                if download_type in ("attachment", "both"):
+                    files = self.get_attachment_files(assign["url"])
+                    if files:
+                        log(f"  • {assign_name} ({len(files)} задание)")
+                        course_count += len(files)
+                        for f in files:
+                            tasks.append((f["url"], f["filename"], assign_folder))
 
             if course_count:
                 log(f"  всего файлов: {course_count}")
@@ -781,7 +974,7 @@ def main():
 
     if args.web:
         from web_app import app
-        app.run(host="0.0.0.0", port=args.port, debug=False)
+        app.run(host="127.0.0.1", port=args.port, debug=False)
         return
 
     if args.monitor:

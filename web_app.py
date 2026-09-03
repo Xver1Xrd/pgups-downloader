@@ -4,8 +4,11 @@ import sys
 import json
 import time
 import base64
+import hashlib
 import threading
 from pathlib import Path
+from functools import wraps
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify, render_template, request, session as flask_session
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -14,16 +17,72 @@ from pgups_downloader import (
     CONFIG_FILE, COOKIES_FILE, LOG_FILE,
     load_config, save_config, log,
 )
+from utils import count_statuses, cache_hash, clear_courses_cache
+
+# Persistent secret key: stored in a file so sessions survive restarts
+_SECRET_KEY_FILE = Path(__file__).parent / ".secret_key"
+
+
+def _load_secret_key() -> bytes:
+    if _SECRET_KEY_FILE.exists():
+        try:
+            return _SECRET_KEY_FILE.read_bytes()
+        except OSError:
+            pass
+    key = os.urandom(32)
+    try:
+        _SECRET_KEY_FILE.write_bytes(key)
+    except OSError:
+        pass
+    return key
+
+
+def _check_web_auth():
+    """Optional HTTP Basic Auth via WEB_AUTH env var (format: 'user:password')."""
+    auth_env = os.environ.get("WEB_AUTH", "")
+    if not auth_env:
+        return True
+    parts = auth_env.split(":", 1)
+    if len(parts) != 2:
+        return True
+    expected_user, expected_pass = parts
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+        user, password = decoded.split(":", 1)
+        return user == expected_user and password == expected_pass
+    except Exception:
+        return False
+
+
+def require_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not _check_web_auth():
+            auth_env = os.environ.get("WEB_AUTH", "")
+            if auth_env:
+                from flask import make_response
+                resp = make_response("Authentication required", 401)
+                resp.headers["WWW-Authenticate"] = 'Basic realm="PGUPS"'
+                return resp
+        return f(*args, **kwargs)
+    return decorated
+
 
 app = Flask(__name__)
-app.secret_key = os.urandom(32)
+app.secret_key = _load_secret_key()
 
 dl = PgupsDownloader()
+courses_lock = threading.Lock()
 auth_lock = threading.Lock()
 last_check: dict[str, dict] = {}
 check_lock = threading.Lock()
 download_status = {"running": False, "message": "", "progress": ""}
 download_lock = threading.Lock()
+_courses_cache = {"data": None, "time": 0}
+CACHE_TTL = 300
 
 
 def get_creds() -> tuple[str, str]:
@@ -41,6 +100,38 @@ def ensure_auth():
             if ok:
                 return True
         return False
+
+
+def _load_course_names_parallel(courses_list: list[dict]) -> list[dict]:
+    """Загрузка имён курсов параллельно."""
+    with ThreadPoolExecutor(max_workers=min(len(courses_list), 5)) as pool:
+        futures = {
+            pool.submit(dl.get_course_name, c["url"]): c
+            for c in courses_list
+        }
+        result = []
+        for f in futures:
+            c = futures[f]
+            try:
+                name = f.result(timeout=15)
+            except Exception:
+                name = f"Курс {c['id']}"
+            result.append({"id": c["id"], "url": c["url"], "name": name})
+        return result
+
+
+@app.before_request
+@require_auth
+def check_auth():
+    pass
+
+
+@app.after_request
+def add_cache_headers(response):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.route("/api/auth/status")
@@ -72,13 +163,14 @@ def api_auth_login():
     email = data.get("email", "").strip()
     password = data.get("password", "").strip()
     captcha = data.get("captcha", "").strip()
+    csrf_token = data.get("csrf_token", "").strip()
     remember = data.get("remember", False)
 
     login, pwd = email or get_creds()[0], password or get_creds()[1]
     with auth_lock:
         if dl.verify_auth():
             return jsonify({"authenticated": True})
-        ok = dl.login_via_portal(login, pwd, captcha, remember)
+        ok = dl.login_via_portal(login, pwd, captcha, remember, csrf_token)
         if ok:
             return jsonify({"authenticated": True})
         return jsonify({"authenticated": False, "error": "Неверный логин, пароль или капча"})
@@ -91,14 +183,9 @@ def index():
 
 @app.route("/download")
 def download_page():
-    cfg_courses = load_config().get("courses", dl.courses)
-    courses_with_names = []
-    for c in cfg_courses:
-        try:
-            name = dl.get_course_name(c["url"])
-        except Exception:
-            name = f"Курс {c['id']}"
-        courses_with_names.append({"id": c["id"], "url": c["url"], "name": name})
+    with courses_lock:
+        cfg_courses = list(dl.courses)
+    courses_with_names = _load_course_names_parallel(cfg_courses)
     return render_template("download.html", courses=courses_with_names, default_workers=DEFAULT_WORKERS)
 
 
@@ -114,74 +201,53 @@ def add_course_page():
 
 @app.route("/settings")
 def settings_page():
-    cfg_courses = load_config().get("courses", dl.courses)
-    courses_with_names = []
-    for c in cfg_courses:
-        try:
-            name = dl.get_course_name(c["url"])
-        except Exception:
-            name = f"Курс {c['id']}"
-        courses_with_names.append({"id": c["id"], "url": c["url"], "name": name})
+    with courses_lock:
+        cfg_courses = list(dl.courses)
+    courses_with_names = _load_course_names_parallel(cfg_courses)
     return render_template("settings.html", courses=courses_with_names, login=load_config().get("login"))
 
 
-_courses_cache = {"data": None, "time": 0}
-CACHE_TTL = 300
-
 def fetch_one_course(course: dict, cookies: list = None, headers: dict = None) -> dict | None:
     try:
-        tmp = PgupsDownloader()
+        tmp_dl = PgupsDownloader(courses=dl.courses)
         if cookies:
             for c in cookies:
-                tmp.session.cookies.set(c.name, c.value, domain=c.domain, path=c.path)
+                tmp_dl.session.cookies.set(c.name, c.value, domain=c.domain, path=c.path)
         if headers:
-            tmp.session.headers.update(headers)
-        rows, name = tmp.check_course(course["url"])
+            tmp_dl.session.headers.update(headers)
+        rows, name = tmp_dl.check_course(course["url"])
     except Exception as e:
         return {"id": course["id"], "name": f"Ошибка: {e}", "error": True}
-    passed = failed = submitted = locked = pending = 0
-    items = []
-    for r in rows:
-        s = r["status"]
-        if s.startswith("+"):
-            passed += 1
-        elif s.startswith("-"):
-            failed += 1
-        elif s.startswith("~"):
-            submitted += 1
-        elif s.startswith("#"):
-            locked += 1
-        else:
-            pending += 1
-        items.append(r)
-    return {
-        "id": course["id"],
-        "name": name,
-        "url": course["url"],
-        "passed": passed,
-        "failed": failed,
-        "submitted": submitted,
-        "locked": locked,
-        "pending": pending,
-        "items": items,
-    }
+    stats = count_statuses(rows)
+    stats["items"] = rows
+    stats["url"] = course["url"]
+    stats["name"] = name
+    stats["id"] = course["id"]
+    return stats
+
 
 @app.route("/api/courses")
 def api_courses():
     now = time.time()
-    if _courses_cache["data"] and now - _courses_cache["time"] < CACHE_TTL:
+    with courses_lock:
+        courses_snapshot = list(dl.courses)
+    cache_key = cache_hash(courses_snapshot)
+    if _courses_cache.get("_key") == cache_key and _courses_cache["data"] and now - _courses_cache["time"] < CACHE_TTL:
         return jsonify(_courses_cache["data"])
 
     ok = ensure_auth()
     if not ok:
-        return jsonify({"courses": [{"id": c["id"], "name": "Нет авторизации", "error": True} for c in dl.courses]})
+        result = {"courses": [{"id": c["id"], "name": "Нет авторизации", "error": True} for c in courses_snapshot]}
+        _courses_cache["data"] = result
+        _courses_cache["time"] = now
+        _courses_cache["_key"] = cache_key
+        return jsonify(result)
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     cookies = list(dl.session.cookies)
     headers = dict(dl.session.headers)
     results = []
     with ThreadPoolExecutor(max_workers=3) as pool:
-        fut = {pool.submit(fetch_one_course, c, cookies, headers): c for c in dl.courses}
+        fut = {pool.submit(fetch_one_course, c, cookies, headers): c for c in courses_snapshot}
         for f in as_completed(fut):
             try:
                 r = f.result(timeout=30)
@@ -198,10 +264,11 @@ def api_courses():
             if r.get("error"):
                 continue
             key = r["id"]
-            last_check[key] = {i["name"]: i["status"] for i in r["items"]}
+            items = r.get("items", [])
+            last_check[key] = {i["name"]: i["status"] for i in items}
             if key in prev:
                 old = prev[key]
-                for item in r["items"]:
+                for item in items:
                     if item["name"] in old and old[item["name"]] != item["status"]:
                         item["changed"] = True
                         item["prev_status"] = old[item["name"]]
@@ -209,6 +276,7 @@ def api_courses():
     data = {"courses": results}
     _courses_cache["data"] = data
     _courses_cache["time"] = now
+    _courses_cache["_key"] = cache_key
     return jsonify(data)
 
 
@@ -217,36 +285,19 @@ def api_course(course_id):
     ok = ensure_auth()
     if not ok:
         return jsonify({"error": "Нет авторизации"}), 401
-    course = next((c for c in dl.courses if c["id"] == course_id), None)
+    with courses_lock:
+        course = next((c for c in dl.courses if c["id"] == course_id), None)
     if not course:
         return jsonify({"error": "Курс не найден"}), 404
     try:
         rows, name = dl.check_course(course["url"])
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    passed = failed = submitted = locked = pending = 0
-    for r in rows:
-        s = r["status"]
-        if s.startswith("+"):
-            passed += 1
-        elif s.startswith("-"):
-            failed += 1
-        elif s.startswith("~"):
-            submitted += 1
-        elif s.startswith("#"):
-            locked += 1
-        else:
-            pending += 1
-    return jsonify({
-        "id": course_id,
-        "name": name,
-        "passed": passed,
-        "failed": failed,
-        "submitted": submitted,
-        "locked": locked,
-        "pending": pending,
-        "items": rows,
-    })
+    stats = count_statuses(rows)
+    stats["id"] = course_id
+    stats["name"] = name
+    stats["items"] = rows
+    return jsonify(stats)
 
 
 @app.route("/api/download", methods=["POST"])
@@ -257,11 +308,13 @@ def api_download():
     data = request.get_json()
     course_ids = data.get("course_ids", [])
     workers = data.get("workers", DEFAULT_WORKERS)
+    download_type = data.get("download_type", "both")
 
-    if course_ids:
-        courses = [c for c in dl.courses if c["id"] in course_ids]
-    else:
-        courses = dl.courses
+    with courses_lock:
+        if course_ids:
+            courses = [c for c in dl.courses if c["id"] in course_ids]
+        else:
+            courses = list(dl.courses)
 
     if not courses:
         return jsonify({"error": "Курсы не найдены"}), 404
@@ -274,35 +327,39 @@ def api_download():
         download_status["progress"] = ""
 
     def run_dl():
-        original = dl.courses
+        with courses_lock:
+            original_courses = list(dl.courses)
+        original_workers = dl.workers
         dl.courses = courses
         dl.workers = workers
         try:
             log(f"\n[WEB] Скачивание {len(courses)} курсов ({workers} потоков)")
             download_status["message"] = "Сбор заданий..."
-            tasks = dl.collect_tasks()
+            tasks = dl.collect_tasks(download_type=download_type)
             if not tasks:
                 download_status["message"] = "Нет файлов для скачивания"
                 download_status["progress"] = "0/0"
             else:
                 download_status["message"] = f"Скачивание {len(tasks)} файлов..."
                 downloaded = 0
-                from concurrent.futures import ThreadPoolExecutor, as_completed
                 with ThreadPoolExecutor(max_workers=workers) as pool:
                     fut = {pool.submit(dl.download_file, url, name, folder): name
                            for url, name, folder in tasks}
+                    total = len(fut)
                     for f in as_completed(fut):
                         if f.result():
                             downloaded += 1
                         done = sum(1 for ff in fut if ff.done())
-                        download_status["progress"] = f"{done}/{len(tasks)}"
-                download_status["message"] = f"Готово! Скачано: {downloaded}, пропущено: {len(tasks) - downloaded}"
-                download_status["progress"] = f"{len(tasks)}/{len(tasks)}"
-            dl.courses = original
+                        download_status["progress"] = f"{done}/{total}"
+                download_status["message"] = f"Готово! Скачано: {downloaded}, пропущено: {total - downloaded}"
+                download_status["progress"] = f"{total}/{total}"
         except Exception as e:
+            log(f"[WEB] Ошибка скачивания: {e}")
             download_status["message"] = f"Ошибка: {e}"
-            dl.courses = original
         finally:
+            with courses_lock:
+                dl.courses = original_courses
+            dl.workers = original_workers
             download_status["running"] = False
 
     t = threading.Thread(target=run_dl, daemon=True)
@@ -328,22 +385,18 @@ def api_settings_login():
         cfg["password"] = password
     save_config(cfg)
     log("[WEB] Логин/пароль сохранены")
+    clear_courses_cache(_courses_cache)
     return jsonify({"status": "ok"})
 
 
 @app.route("/api/settings/courses", methods=["GET", "POST", "DELETE"])
 def api_settings_courses():
     cfg = load_config()
-    courses = cfg.get("courses", dl.courses)
+    with courses_lock:
+        courses = list(dl.courses)
 
     if request.method == "GET":
-        result = []
-        for c in courses:
-            try:
-                name = dl.get_course_name(c["url"])
-            except Exception:
-                name = f"Курс {c['id']}"
-            result.append({"id": c["id"], "url": c["url"], "name": name})
+        result = _load_course_names_parallel(courses)
         return jsonify({"courses": result})
 
     if request.method == "POST":
@@ -360,8 +413,10 @@ def api_settings_courses():
         courses.append(new)
         cfg["courses"] = courses
         save_config(cfg)
-        dl.courses = courses
+        with courses_lock:
+            dl.courses = list(courses)
         log(f"[WEB] Курс {course_id} добавлен")
+        clear_courses_cache(_courses_cache)
         return jsonify({"status": "ok", "id": course_id})
 
     if request.method == "DELETE":
@@ -370,15 +425,20 @@ def api_settings_courses():
         courses = [c for c in courses if c["id"] != course_id]
         cfg["courses"] = courses
         save_config(cfg)
-        dl.courses = courses
+        with courses_lock:
+            dl.courses = list(courses)
         log(f"[WEB] Курс {course_id} удалён")
+        clear_courses_cache(_courses_cache)
         return jsonify({"status": "ok"})
 
 
 @app.route("/api/settings/logs", methods=["DELETE"])
 def api_clear_logs():
     if LOG_FILE.exists():
-        LOG_FILE.unlink()
+        try:
+            LOG_FILE.unlink()
+        except OSError:
+            pass
     return jsonify({"status": "ok"})
 
 
@@ -388,4 +448,4 @@ if __name__ == "__main__":
         ensure_auth()
     port = int(os.environ.get("PORT", 5000))
     log(f"[WEB] Сервер запущен на http://127.0.0.1:{port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="127.0.0.1", port=port, debug=False)

@@ -5,48 +5,79 @@
 
 <div class="card">
   <div class="card-title">Выберите курсы</div>
-  <ul class="check-list" id="course-list">
+  <div style="display:flex;flex-direction:column;gap:6px;">
     {% for c in courses %}
-    <li><label><input type="checkbox" value="{{ c.id }}" checked> {{ c.name }} <span style="color:var(--text-secondary);font-size:12px;">(id: {{ c.id }})</span></label></li>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+      <input type="checkbox" value="{{ c.id }}" style="width:16px;height:16px;cursor:pointer;">
+      <span>{{ c.name }}</span>
+    </label>
     {% endfor %}
-  </ul>
-  <div class="form-group" style="margin-top:14px;">
-    <label class="form-label" for="workers">Количество потоков</label>
-    <input type="number" id="workers" class="form-input" value="{{ default_workers }}" min="1" max="10" style="width:100px;">
   </div>
-  <div style="display:flex;gap:8px;flex-wrap:wrap;">
-    <button class="btn btn-primary" onclick="startDownload()">Начать скачивание</button>
-    <button class="btn btn-outline" onclick="startDownloadAll()">Скачать всё</button>
+  <div style="margin-top:12px;">
+    <button class="btn btn-outline btn-sm" onclick="toggleAllCourses(true)">Выбрать все</button>
+    <button class="btn btn-outline btn-sm" onclick="toggleAllCourses(false)">Снять все</button>
   </div>
 </div>
 
-<div class="card" id="progress-card" style="display:none;">
+<div class="card" style="margin-top:16px;">
+  <div class="card-title">Что скачивать</div>
+  <div style="display:flex;gap:16px;">
+    <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+      <input type="checkbox" id="dl-submission" checked style="width:16px;height:16px;cursor:pointer;">
+      Мои отправки
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+      <input type="checkbox" id="dl-attachment" checked style="width:16px;height:16px;cursor:pointer;">
+      Задания
+    </label>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px;">
+  <div class="form-group">
+    <label class="form-label" for="workers">Количество потоков</label>
+    <input type="number" id="workers" class="form-input" value="{{ default_workers }}" min="1" max="10" style="width:100px;">
+  </div>
+  <button class="btn btn-primary" onclick="startDownload()">Начать скачивание</button>
+</div>
+
+<div class="card" id="progress-card" style="display:none;margin-top:16px;">
   <div class="card-title">Статус скачивания</div>
   <div id="progress-message" style="font-size:14px;"></div>
-  <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
-  <div id="progress-text" class="subtext"></div>
+  <div class="progress-mini" style="margin:12px 0;"><div class="progress-mini-fill" id="progress-fill" style="width:0%"></div></div>
+  <div id="progress-text" style="font-size:12px;color:var(--text-secondary);"></div>
 </div>
 {% endblock %}
 {% block scripts %}
 <script>
+function toggleAllCourses(checked) {
+  document.querySelectorAll('#course-list input').forEach(c => c.checked = checked);
+}
+
 function getSelected() {
   const checks = document.querySelectorAll('#course-list input:checked');
   return Array.from(checks).map(c => c.value);
 }
 
-function startDownloadAll() {
-  document.querySelectorAll('#course-list input').forEach(c => c.checked = true);
-  startDownload();
+function getDownloadType() {
+  const sub = document.getElementById('dl-submission').checked;
+  const att = document.getElementById('dl-attachment').checked;
+  if (sub && att) return 'both';
+  if (sub) return 'submission';
+  if (att) return 'attachment';
+  return 'none';
 }
 
 function startDownload() {
   const ids = getSelected();
   if (ids.length === 0) { flash('Выберите хотя бы один курс', 'error'); return; }
+  const dt = getDownloadType();
+  if (dt === 'none') { flash('Выберите тип скачивания', 'error'); return; }
   const workers = document.getElementById('workers').value || 3;
   fetch('/api/download', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({course_ids: ids, workers: parseInt(workers)}),
+    body: JSON.stringify({course_ids: ids, workers: parseInt(workers), download_type: dt}),
   }).then(r => r.json()).then(d => {
     if (d.error) { flash(d.error, 'error'); return; }
     flash('Скачивание запущено', 'success');

@@ -19,17 +19,19 @@
 
   <div class="card">
     <div class="card-title">Аккаунт</div>
-    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
-      Логин: <strong>{{ login or 'не указан' }}</strong>
-    </p>
-    <button class="btn btn-outline btn-sm" onclick="showLoginForm()">Сменить пароль</button>
-    <div id="login-form" style="display:none;margin-top:12px;">
+    <button class="btn btn-outline btn-sm" onclick="showLoginForm()" style="margin-bottom:12px;">Сменить логин/пароль</button>
+    <div id="login-form" style="display:none;margin-bottom:12px;">
       <div class="form-group">
-        <label class="form-label">Новый пароль</label>
-        <input type="password" id="new-password" class="form-input" placeholder="Пароль">
+        <label class="form-label">Email</label>
+        <input type="email" id="new-login" class="form-input" placeholder="Email" value="{{ login or '' }}">
       </div>
-      <button class="btn btn-primary btn-sm" onclick="savePassword()">Сохранить</button>
+      <div class="form-group">
+        <label class="form-label">Пароль</label>
+        <input type="password" id="new-password" class="form-input" placeholder="Новый пароль">
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="saveCredentials()">Сохранить</button>
     </div>
+    <div id="captcha-login" style="margin-top:8px;"></div>
   </div>
 </div>
 
@@ -48,15 +50,65 @@ function showLoginForm() {
   document.getElementById('login-form').style.display = 'block';
 }
 
-async function savePassword() {
+async function saveCredentials() {
+  const login = document.getElementById('new-login').value.trim();
   const password = document.getElementById('new-password').value.trim();
-  if (!password) return;
+  const body = {};
+  if (login) body.login = login;
+  if (password) body.password = password;
+  if (!login && !password) return;
   await fetch('/api/settings/login', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({password}),
+    body: JSON.stringify(body),
   });
-  flash('Пароль сохранён. Перезапустите сервер.', 'success');
+  flash('Сохранено. Перезапустите сервер для применения.', 'success');
 }
+
+async function loginWithCaptchaManual() {
+  const div = document.getElementById('captcha-login');
+  div.innerHTML = 'Загрузка капчи…';
+  try {
+    const r = await fetch('/api/auth/captcha');
+    const d = await r.json();
+    if (!d.captcha_b64) { div.innerHTML = 'Ошибка загрузки капчи'; return; }
+    div.innerHTML = '<div class="card" style="padding:14px;"><div class="card-title">Ручной вход с капчей</div>'
+      + '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">'
+      + '<img src="data:image/png;base64,' + d.captcha_b64 + '" style="height:50px;border-radius:4px;background:#fff;">'
+      + '<input type="text" id="manual-captcha" placeholder="Код с картинки" class="form-input" style="width:120px;">'
+      + '<button class="btn btn-primary btn-sm" onclick="submitManualCaptcha()">Войти</button>'
+      + '</div>'
+      + '<input type="hidden" id="manual-csrf" value="' + d.csrf_token + '">'
+      + '</div>';
+  } catch(e) { div.innerHTML = 'Ошибка загрузки капчи'; }
+}
+
+async function submitManualCaptcha() {
+  const captcha = document.getElementById('manual-captcha').value.trim();
+  const csrf = document.getElementById('manual-csrf').value;
+  if (!captcha) return;
+  const div = document.getElementById('captcha-login');
+  div.innerHTML = 'Авторизация…';
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({captcha, csrf_token: csrf}),
+    });
+    const d = await r.json();
+    if (d.authenticated) { div.innerHTML = '<div class="msg msg-success">Вход выполнен!</div>'; }
+    else { div.innerHTML = '<div class="msg msg-error">Неверная капча. <a href="#" onclick="loginWithCaptchaManual();return false;">Попробовать снова</a></div>'; }
+  } catch(e) { div.innerHTML = '<div class="msg msg-error">Ошибка</div>'; }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  const div = document.getElementById('captcha-login');
+  if (div) {
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-outline btn-sm';
+    btn.textContent = 'Войти с капчей';
+    btn.onclick = loginWithCaptchaManual;
+    div.appendChild(btn);
+  }
+});
 
 function removeCourse(id) {
   if (!confirm('Удалить курс ' + id + '?')) return;

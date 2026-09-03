@@ -216,7 +216,39 @@ async function checkAuth() {
     } catch(e) {}
     await new Promise(r => setTimeout(r, 1500));
   }
-  banner.innerHTML = 'Не удалось войти. <a href="/settings">Проверьте логин/пароль</a>';
+  banner.innerHTML = 'Не удалось войти. <a href="/settings" style="margin-right:8px;">Проверьте логин/пароль</a>'
+    + '<button class="btn btn-outline btn-sm" onclick="showCaptchaForm()" style="vertical-align:middle;">Ввести капчу</button>';
+}
+async function showCaptchaForm() {
+  const banner = document.getElementById('auth-banner');
+  try {
+    const r = await fetch('/api/auth/captcha');
+    const d = await r.json();
+    if (!d.captcha_b64) { banner.innerHTML = 'Ошибка загрузки капчи'; return; }
+    banner.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:center;">'
+      + '<img src="data:image/png;base64,' + d.captcha_b64 + '" style="height:50px;border-radius:4px;background:#fff;">'
+      + '<input type="text" id="captcha-input" placeholder="Код с картинки" style="padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:14px;width:100px;">'
+      + '<button class="btn btn-primary btn-sm" onclick="loginWithCaptcha()">Войти</button>'
+      + '<button class="btn btn-outline btn-sm" onclick="checkAuth()">Отмена</button>'
+      + '</div>'
+      + '<input type="hidden" id="csrf-token" value="' + d.csrf_token + '">';
+  } catch(e) { banner.innerHTML = 'Ошибка загрузки капчи'; }
+}
+async function loginWithCaptcha() {
+  const banner = document.getElementById('auth-banner');
+  const captcha = document.getElementById('captcha-input').value.trim();
+  const csrf = document.getElementById('csrf-token').value;
+  if (!captcha) return;
+  banner.innerHTML = 'Авторизация…';
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({captcha, csrf_token: csrf}),
+    });
+    const d = await r.json();
+    if (d.authenticated) { banner.style.display = 'none'; flash('Вход выполнен', 'success'); }
+    else { banner.innerHTML = 'Неверная капча. <a href="#" onclick="showCaptchaForm();return false;">Попробовать снова</a>'; }
+  } catch(e) { banner.innerHTML = 'Ошибка'; }
 }
 document.addEventListener('DOMContentLoaded', checkAuth);
 </script>

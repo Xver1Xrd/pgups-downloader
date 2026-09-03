@@ -2,11 +2,17 @@
 
 Скачивание лабораторных работ и проверка успеваемости в ЭИОС ПГУПС.
 
+## Запуск веб-интерфейса
+
+```
+venv/bin/python pgups_downloader.py --web
+```
+
 ## Установка
 
 ```
 python3 -m venv venv
-venv/bin/pip install requests beautifulsoup4 flask Pillow opencv-python-headless ddddocr
+venv/bin/pip install -r requirements.txt
 ```
 
 ## CLI
@@ -27,6 +33,16 @@ venv/bin/python pgups_downloader.py --web
 Открыть http://127.0.0.1:5000
 
 При запуске сервер сам логинится: распознаёт капчу, проходит SSO через my.pgups.ru/auth/sdo, сохраняет cookies. Результаты проверки кешируются на 5 минут.
+
+### Защита веб-интерфейса
+
+Можно добавить HTTP Basic Auth через переменную окружения:
+
+```
+WEB_AUTH="admin:secure_password" venv/bin/python pgups_downloader.py --web
+```
+
+Формат: `WEB_AUTH="user:password"`
 
 ## Как работает авторизация
 
@@ -55,7 +71,7 @@ venv/bin/python pgups_downloader.py --web
 ## Файлы на диске
 
 ```
-~/Downloads/pgups/
+~/Документы/pgups/
   Название курса/
     Название работы/
       файлы
@@ -67,3 +83,16 @@ venv/bin/python pgups_downloader.py --web
 - requests, beautifulsoup4
 - flask
 - Pillow, opencv-python-headless, ddddocr
+
+## Улучшения
+
+- Параллельная загрузка имён курсов в веб-интерфейсе
+- Повторные попытки при ошибках скачивания и HTTP-запросов
+- Проверка дубликатов по SHA256 вместо размера файла
+- Защита от гонки потоков через блокировки
+- Ключ сессии Flask сохраняется между перезапусками
+- HTTP Basic Auth для веб-интерфейса
+- Корректное восстановление cookies при неудачном входе
+- Потокобезопасная инициализация OCR
+- Обработка损坏ного config.json
+- Null-safety в captcha_solver
