@@ -95,7 +95,9 @@ def _generate_csrf_token() -> str:
     now = time.time()
     with _csrf_lock:
         # Clean old tokens
+        global _csrf_tokens
         _csrf_tokens = {k: v for k, v in _csrf_tokens.items() if now - v[1] < CSRF_TTL}
+    _csrf_tokens[token] = (token, now)
     return token
 
 
@@ -105,8 +107,9 @@ def _validate_csrf_token(token: str) -> bool:
         return False
     now = time.time()
     with _csrf_lock:
+        global _csrf_tokens
         # Clean old tokens
-        _csrf_tokens.update({k: v for k, v in _csrf_tokens.items() if now - v[1] < CSRF_TTL})
+        _csrf_tokens = {k: v for k, v in _csrf_tokens.items() if now - v[1] < CSRF_TTL}
         stored = _csrf_tokens.pop(token, None)
         if stored is None:
             return False
