@@ -53,6 +53,7 @@ download_lock = threading.Lock()
 _courses_cache = {"data": None, "time": 0, "stale": None, "stale_time": 0}
 _auth_cache = {"authenticated": None, "time": 0}
 _preload_started = False
+_shutdown_event = threading.Event()
 
 # Metrics
 _metrics_lock = threading.Lock()
@@ -424,8 +425,12 @@ def create_app(testing: bool = False) -> Flask:
 
     def _do_refresh_courses(courses_snapshot: list):
         now = time.time()
+        if _shutdown_event.is_set():
+            return
         try:
             ok = ensure_auth()
+            if _shutdown_event.is_set():
+                return
             if not ok:
                 result = {"courses": [{"id": c["id"], "name": "Нет авторизации", "error": True} for c in courses_snapshot]}
                 _courses_cache["data"] = result
@@ -655,22 +660,27 @@ def create_app(testing: bool = False) -> Flask:
     # === Preload Cache ===
     def _preload_cache():
         global _preload_started
-        if _preload_started:
+        if _preload_started or _shutdown_event.is_set():
             return
         _preload_started = True
         time.sleep(2)
+        if _shutdown_event.is_set():
+            return
         try:
             dl = get_downloader()
             with courses_lock:
                 snapshot = list(dl.courses)
-            _do_refresh_courses(snapshot)
+            if not _shutdown_event.is_set():
+                _do_refresh_courses(snapshot)
             log("[WEB] Кэш предзагружен")
         except Exception as e:
-            log(f"[WEB] Ошибка предзагрузки кэша: {e}")
+            if not _shutdown_event.is_set():
+                log(f"[WEB] Ошибка предзагрузки кэша: {e}")
 
     # === Signal Handler ===
     def _signal_handler(signum, frame):
         log("[WEB] Получен сигнал завершения, ожидаем потоки...")
+        _shutdown_event.set()
         while download_status["running"]:
             time.sleep(0.5)
         sys.exit(0)
