@@ -6,7 +6,7 @@ import ddddocr
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
-MY_BASE_URL = "https://my.pgups.ru"
+from pgups.config import MY_BASE_URL
 
 _ocr = None
 _ocr_lock = Lock()

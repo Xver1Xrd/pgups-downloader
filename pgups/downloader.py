@@ -12,20 +12,14 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import requests
-from captcha_solver import solve_one_captcha, get_csrf_and_captcha
 
-BASE_URL = "https://sdo.pgups.ru"
-MY_BASE_URL = "https://my.pgups.ru"
-CONFIG_FILE = Path(__file__).parent / "config.json"
-COOKIES_FILE = Path(__file__).parent / "cookies.txt"
-DOWNLOAD_BASE = Path.home() / "Документы" / "pgups"
-LOG_DIR = Path(__file__).parent / "logs"
-LOG_FILE = LOG_DIR / "pgups.log"
-MAX_LOG_SIZE = 10 * 1024 * 1024  # 10 MB
-MAX_LOG_FILES = 3
-DEFAULT_WORKERS = 3
-MAX_RETRIES = 3
-RETRY_DELAY = 3
+from pgups.captcha_solver import solve_one_captcha, get_csrf_and_captcha
+from pgups.config import (
+    BASE_URL, MY_BASE_URL, CONFIG_FILE, COOKIES_FILE, DOWNLOAD_BASE,
+    LOG_DIR, LOG_FILE, MAX_LOG_SIZE, MAX_LOG_FILES, DEFAULT_WORKERS,
+    MAX_RETRIES, RETRY_DELAY,
+)
+from pgups.utils import count_statuses, cache_hash, clear_courses_cache
 
 log_lock = Lock()
 
@@ -1006,7 +1000,8 @@ def main():
         return
 
     if args.web:
-        from web_app import app
+        from pgups.web import create_app
+        app = create_app()
         app.run(host="127.0.0.1", port=args.port, debug=False)
         return
 
