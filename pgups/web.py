@@ -687,8 +687,11 @@ def create_app(testing: bool = False) -> Flask:
 
     # === Start Preload ===
     threading.Thread(target=_preload_cache, daemon=True).start()
-    signal.signal(signal.SIGTERM, _signal_handler)
-    signal.signal(signal.SIGINT, _signal_handler)
+    
+    # Only install signal handlers when running in a terminal (not in background)
+    if sys.stdout.isatty() or sys.stdin.isatty():
+        signal.signal(signal.SIGTERM, _signal_handler)
+        signal.signal(signal.SIGINT, _signal_handler)
 
     return app
 
