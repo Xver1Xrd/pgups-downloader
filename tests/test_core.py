@@ -55,3 +55,85 @@ def test_non_pgups_download_blocked(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "load_config", lambda: {})
     dl = PgupsDownloader()
     assert not dl.download_file("https://evil.example/file", "../secret.txt", tmp_path)
+
+
+def test_cookies_roundtrip(monkeypatch, tmp_path):
+    import pgups_downloader as module
+    cookie_file = tmp_path / "cookies.txt"
+    monkeypatch.setattr(module, "COOKIES_FILE", cookie_file)
+    monkeypatch.setattr(module, "load_config", lambda: {"courses": []})
+    dl = PgupsDownloader()
+    dl.session.cookies.set("MoodleSession", "value1", domain="sdo.pgups.ru", path="/")
+    dl.session.cookies.set("portal", "value2", domain="my.pgups.ru", path="/")
+    dl._save_session_cookies()
+    content = cookie_file.read_text()
+    assert "\\n" not in content
+    assert len(content.splitlines()) >= 3
+    assert cookie_file.stat().st_mode & 0o077 == 0
+    another = PgupsDownloader()
+    assert another.session.cookies.get("MoodleSession", domain="sdo.pgups.ru", path="/") == "value1"
+
+
+def test_threaded_login_cookie_adoption(monkeypatch, tmp_path):
+    import threading
+    import pgups_downloader as module
+    monkeypatch.setattr(module, "COOKIES_FILE", tmp_path / "cookies.txt")
+    monkeypatch.setattr(module, "load_config", lambda: {"courses": []})
+    dl = PgupsDownloader()
+    def login_thread():
+        local = dl._http_session()
+        local.cookies.set("MoodleSession", "authenticated", domain="sdo.pgups.ru", path="/")
+        dl._save_session_cookies()
+    t = threading.Thread(target=login_thread)
+    t.start()
+    t.join()
+    assert dl.session.cookies.get("MoodleSession", domain="sdo.pgups.ru", path="/") == "authenticated"
+
+
+def test_untrusted_redirect(monkeypatch, tmp_path):
+    import pgups_downloader as module
+    monkeypatch.setattr(module, "COOKIES_FILE", tmp_path / "missing")
+    monkeypatch.setattr(module, "load_config", lambda: {"courses": []})
+    dl = PgupsDownloader()
+    class Redirect:
+        status_code = 302
+        headers = {"Location": "https://evil.example/stolen"}
+        def close(self): pass
+    calls = []
+    def fake(url, **kwargs):
+        calls.append(url)
+        return Redirect()
+    monkeypatch.setattr(dl, "get", fake)
+    with pytest.raises(ValueError, match="Недоверенный"):
+        dl._trusted_file_request("GET", "https://sdo.pgups.ru/pluginfile.php/test")
+    assert len(calls) == 1
+
+
+def test_blank_courses_in_web(monkeypatch):
+    import web_app
+    assert web_app._load_course_names_parallel([]) == []
+
+
+def test_web_api_rejects_missing_csrf(monkeypatch):
+    import web_app
+    monkeypatch.setattr(web_app, "_check_web_auth", lambda: True)
+    with web_app.app.test_client() as client:
+        assert client.get("/").status_code == 200
+        assert client.post("/api/settings/courses", json={"url":"4388"}).status_code == 403
+
+
+@pytest.mark.parametrize("url", [
+    "https://evil.example/course/view.php?id=123",
+    "http://sdo.pgups.ru/course/view.php?id=123",
+    "https://sdo.pgups.ru.evil.example/course/view.php?id=123",
+    "https://sdo.pgups.ru@evil.example/course/view.php?id=123",
+    "https://sdo.pgups.ru/course/view.php?id=invalid",
+])
+def test_web_rejects_untrusted_course_url(monkeypatch, url):
+    import web_app
+    monkeypatch.setattr(web_app, "_check_web_auth", lambda: True)
+    with web_app.app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["csrf"] = "test-token"
+        resp = client.post("/api/settings/courses", json={"url":url}, headers={"X-CSRF-Token":"test-token"})
+        assert resp.status_code == 400
