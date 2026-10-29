@@ -34,6 +34,7 @@ _SECRET_KEY_FILE = Path(__file__).parent / ".secret_key"
 def _load_secret_key() -> bytes:
     if _SECRET_KEY_FILE.exists():
         try:
+            _SECRET_KEY_FILE.chmod(0o600)
             return _SECRET_KEY_FILE.read_bytes()
         except OSError:
             pass
@@ -152,6 +153,11 @@ def start_scheduler():
     threading.Thread(target=scheduler, daemon=True, name="pgups-auto-sync").start()
 
 
+def json_object() -> dict:
+    payload = request.get_json(silent=True)
+    return payload if isinstance(payload, dict) else {}
+
+
 def get_creds() -> tuple[str, str]:
     cfg = load_config()
     login = cfg.get("login", "")
@@ -254,7 +260,7 @@ def api_auth_captcha():
 
 @app.route("/api/auth/login", methods=["POST"])
 def api_auth_login():
-    data = request.get_json(silent=True) or {}
+    data = json_object()
     if any(not isinstance(data.get(k, ""), str) for k in ("email","password","captcha","csrf_token")):
         return jsonify({"error":"Некорректные параметры авторизации"}), 400
     email = data.get("email", "").strip()
@@ -336,7 +342,8 @@ def api_courses():
 
     ok = ensure_auth()
     if not ok:
-        cached = store.cached_courses()
+        configured_ids = {c["id"] for c in courses_snapshot}
+        cached = [c for c in store.cached_courses() if c["id"] in configured_ids]
         result = {"courses": cached if cached else [{"id": c["id"], "name": "Нет авторизации", "error": True} for c in courses_snapshot], "offline": bool(cached)}
         # Never cache offline/auth failures for 5 minutes: reconnect immediately.
         return jsonify(result)
@@ -358,21 +365,9 @@ def api_courses():
     # Prefer a last-known-good snapshot when one remote course fails.
     cached_by_id = {c["id"]:c for c in store.cached_courses()}
     results = [cached_by_id.get(r["id"], r) if r.get("error") else r for r in results]
-    with check_lock:
-        prev = dict(last_check)
-        last_check.clear()
-        for r in results:
-            if r.get("error"):
-                continue
-            key = r["id"]
-            items = r.get("items", [])
-            last_check[key] = {i["name"]: i["status"] for i in items}
-            if key in prev:
-                old = prev[key]
-                for item in items:
-                    if item["name"] in old and old[item["name"]] != item["status"]:
-                        item["changed"] = True
-                        item["prev_status"] = old[item["name"]]
+    # Stable presentation order, and persistent events are derived by Store.
+    by_id = {r["id"]:r for r in results}
+    results = [by_id[c["id"]] for c in courses_snapshot if c["id"] in by_id]
 
     data = {"courses": results}
     _courses_cache["data"] = data
@@ -385,7 +380,9 @@ def api_courses():
 def api_course(course_id):
     ok = ensure_auth()
     if not ok:
-        cached = next((c for c in store.cached_courses() if c["id"] == course_id), None)
+        with courses_lock:
+            allowed = any(c["id"] == course_id for c in dl.courses)
+        cached = next((c for c in store.cached_courses() if c["id"] == course_id), None) if allowed else None
         if cached:
             return jsonify(cached)
         return jsonify({"error": "Нет авторизации"}), 401
@@ -457,7 +454,7 @@ def api_automation():
         return jsonify({"auto_sync": cfg.get("auto_sync", False),
                         "sync_interval_minutes": cfg.get("sync_interval_minutes", 30),
                         "desktop_notifications": cfg.get("desktop_notifications", False)})
-    data = request.get_json(silent=True) or {}
+    data = json_object()
     minutes = data.get("sync_interval_minutes", 30)
     if type(minutes) is not int or not 15 <= minutes <= 1440:
         return jsonify({"error": "Интервал синхронизации: от 15 до 1440 минут"}), 400
@@ -474,7 +471,7 @@ def api_download():
     ok = ensure_auth()
     if not ok:
         return jsonify({"error": "Нет авторизации"}), 401
-    data = request.get_json(silent=True) or {}
+    data = json_object()
     course_ids = data.get("course_ids", [])
     download_type = data.get("download_type", "both")
     try:
@@ -570,7 +567,7 @@ def api_download_status():
 
 @app.route("/api/settings/login", methods=["POST"])
 def api_settings_login():
-    data = request.get_json(silent=True) or {}
+    data = json_object()
     if not isinstance(data.get("login", ""), str) or not isinstance(data.get("password", ""), str):
         return jsonify({"error":"Некорректный логин или пароль"}), 400
     login = data.get("login", "").strip()
@@ -625,7 +622,7 @@ def api_settings_courses():
         return jsonify({"courses": result})
 
     if request.method == "POST":
-        data = request.get_json(silent=True) or {}
+        data = json_object()
         url = data.get("url", "")
         if not isinstance(url, str):
             return jsonify({"error":"Некорректный URL"}), 400
@@ -658,7 +655,7 @@ def api_settings_courses():
         return jsonify({"status": "ok", "id": course_id})
 
     if request.method == "DELETE":
-        data = request.get_json(silent=True) or {}
+        data = json_object()
         course_id = data.get("id")
         courses = [c for c in courses if c["id"] != course_id]
         cfg["courses"] = courses
