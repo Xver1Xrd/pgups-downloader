@@ -335,9 +335,7 @@ def api_courses():
     if not ok:
         cached = store.cached_courses()
         result = {"courses": cached if cached else [{"id": c["id"], "name": "Нет авторизации", "error": True} for c in courses_snapshot], "offline": bool(cached)}
-        _courses_cache["data"] = result
-        _courses_cache["time"] = now
-        _courses_cache["_key"] = cache_key
+        # Never cache offline/auth failures for 5 minutes: reconnect immediately.
         return jsonify(result)
 
     cookies = list(dl.session.cookies)
