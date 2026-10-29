@@ -39,6 +39,7 @@
     <input type="number" id="workers" class="form-input" value="{{ default_workers }}" min="1" max="10" style="width:100px;">
   </div>
   <button class="btn btn-primary" onclick="startDownload()">Начать скачивание</button>
+  <button id="cancel-download" class="btn btn-outline" style="display:none" onclick="cancelDownload()">Отменить</button>
 </div>
 
 <div class="card" id="progress-card" style="display:none;margin-top:16px;">
@@ -85,12 +86,21 @@ function startDownload() {
   });
 }
 
+async function cancelDownload() {
+  try {
+    const response = await fetch("/api/download/cancel", {method:"POST"});
+    if (!response.ok) throw Error("Не удалось отменить загрузку");
+    flash("Запрошена отмена загрузки", "success");
+  } catch(error) { flash(error.message,"error"); }
+}
+
 function pollProgress() {
   const card = document.getElementById('progress-card');
   const msg = document.getElementById('progress-message');
   const fill = document.getElementById('progress-fill');
   const text = document.getElementById('progress-text');
   card.style.display = 'block';
+  document.getElementById('cancel-download').style.display = '';
   const iv = setInterval(async () => {
     const r = await fetch('/api/download/status');
     const d = await r.json();
@@ -101,7 +111,10 @@ function pollProgress() {
       fill.style.width = total > 0 ? Math.round(done/total*100) + '%' : '0%';
       text.textContent = d.progress;
     }
-    if (!d.running) { clearInterval(iv); }
+    if (!d.running) {
+      clearInterval(iv);
+      document.getElementById('cancel-download').style.display = 'none';
+    }
   }, 1000);
 }
 </script>
