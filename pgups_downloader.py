@@ -54,6 +54,16 @@ def sanitize(name: str, strip_задание: bool = False) -> str:
     return name or "untitled"
 
 
+def trusted_moodle_url(url: str) -> bool:
+    """Only accept HTTPS links to the Moodle origin (no userinfo or custom ports)."""
+    try:
+        parsed = urlsplit(url)
+        return (parsed.scheme == "https" and parsed.hostname == "sdo.pgups.ru"
+                and not parsed.username and not parsed.password and parsed.port in (None, 443))
+    except ValueError:
+        return False
+
+
 def safe_filename(name: str) -> str:
     """Discard untrusted URL path components and unsafe filesystem characters."""
     name = unquote(str(name)).replace("\\", "/").split("/")[-1]
@@ -530,10 +540,13 @@ class PgupsDownloader:
                 name = link.get_text(strip=True)
                 if not name:
                     name = f"lab_{assign_id}"
+                full_url = urljoin(BASE_URL, href)
+                if not trusted_moodle_url(full_url):
+                    continue
                 assignments.append({
                     "id": assign_id,
                     "name": name,
-                    "url": href if href.startswith("http") else urljoin(BASE_URL, href),
+                    "url": full_url,
                 })
         return assignments
 
@@ -546,8 +559,8 @@ class PgupsDownloader:
         for link in soup.find_all("a", href=True):
             href = link["href"]
             if "pluginfile.php" in href and "submission_files" in href:
-                full_url = href if href.startswith("http") else urljoin(BASE_URL, href)
-                if full_url in seen_urls:
+                full_url = urljoin(BASE_URL, href)
+                if not trusted_moodle_url(full_url) or full_url in seen_urls:
                     continue
                 seen_urls.add(full_url)
                 filename = safe_filename(urlsplit(full_url).path.split("/")[-1])
@@ -563,8 +576,8 @@ class PgupsDownloader:
         for link in soup.find_all("a", href=True):
             href = link["href"]
             if "pluginfile.php" in href and "attachment" in href:
-                full_url = href if href.startswith("http") else urljoin(BASE_URL, href)
-                if full_url in seen_urls:
+                full_url = urljoin(BASE_URL, href)
+                if not trusted_moodle_url(full_url) or full_url in seen_urls:
                     continue
                 seen_urls.add(full_url)
                 filename = safe_filename(urlsplit(full_url).path.split("/")[-1])
@@ -576,8 +589,7 @@ class PgupsDownloader:
         """Reject cross-origin redirects before transmitting authenticated requests."""
         for _ in range(6):
             parsed = urlsplit(url)
-            if (parsed.scheme != "https" or parsed.hostname != "sdo.pgups.ru"
-                    or parsed.username or parsed.password or parsed.port not in (None, 443)):
+            if not trusted_moodle_url(url):
                 raise ValueError("Недоверенный адрес файла или перенаправления")
             if method == "HEAD":
                 response = self.head(url, allow_redirects=False, **kwargs)
@@ -621,7 +633,7 @@ class PgupsDownloader:
         folder.mkdir(parents=True, exist_ok=True)
         filename = safe_filename(filename)
         parsed_url = urlsplit(url)
-        if parsed_url.scheme != "https" or parsed_url.hostname != "sdo.pgups.ru" or parsed_url.username or parsed_url.password:
+        if not trusted_moodle_url(url):
             log("[!] Заблокирован URL скачивания вне sdo.pgups.ru")
             return False
         filepath = folder / filename
@@ -818,7 +830,8 @@ class PgupsDownloader:
                 m = re.search(r"id=(\d+)", a["href"])
                 if m:
                     cm_id = m.group(1)
-                    assign_url = a["href"]
+                    candidate = urljoin(BASE_URL, a["href"])
+                    assign_url = candidate if trusted_moodle_url(candidate) else None
                     break
 
             locked = is_locked(name_raw, cm_id)
@@ -1017,7 +1030,11 @@ class PgupsDownloader:
 
         if save_login and username and password:
             from secret_store import save_password
-            save_password(username, password)
+            try:
+                save_password(username, password)
+            except RuntimeError as exc:
+                log(f"[!] {exc}. Вход продолжается без сохранения пароля.")
+                save_login = False
             self.config["login"] = username
             self.config.pop("password", None)
             self.config["courses"] = self.courses
@@ -1078,6 +1095,10 @@ def main():
     parser.add_argument("--captcha", type=str, default="",
                         help="Код капчи для входа через портал")
     args = parser.parse_args()
+    if args.workers is not None and not (1 <= args.workers <= 10):
+        parser.error("--workers должен быть от 1 до 10")
+    if args.interval < 15:
+        parser.error("--interval должен быть не меньше 15 секунд")
     if args.prompt_password:
         import getpass
         args.password = getpass.getpass("Пароль ЭИОС: ")
