@@ -48,9 +48,37 @@
   <div class="progress-mini" style="margin:12px 0;"><div class="progress-mini-fill" id="progress-fill" style="width:0%"></div></div>
   <div id="progress-text" style="font-size:12px;color:var(--text-secondary);"></div>
 </div>
+<div class="card" style="margin-top:16px;">
+  <div class="card-title">История загрузок</div>
+  <div class="item-list" id="download-jobs">Загрузка журнала…</div>
+</div>
 {% endblock %}
 {% block scripts %}
 <script>
+async function loadDownloadJobs() {
+  const parent = document.getElementById('download-jobs');
+  try {
+    const response = await fetch('/api/download/jobs');
+    if (!response.ok) throw Error('Ошибка получения истории');
+    const jobs = (await response.json()).jobs;
+    parent.replaceChildren();
+    if (!jobs.length) { parent.textContent = 'Пока нет загрузок'; return; }
+    for (const job of jobs) {
+      const row = document.createElement('div');
+      row.className = 'item-row';
+      const label = document.createElement('span');
+      label.className = 'item-name';
+      label.textContent = new Date(job.created_at).toLocaleString('ru-RU') + ' · ' + job.status;
+      const stats = document.createElement('span');
+      stats.className = 'item-status';
+      stats.textContent = job.done + '/' + job.total + ' · файлов: ' + job.downloaded;
+      row.append(label,stats);
+      parent.appendChild(row);
+    }
+  } catch(error) { parent.textContent = error.message; }
+}
+loadDownloadJobs();
+
 function toggleAllCourses(checked) {
   document.querySelectorAll('#course-list input').forEach(c => c.checked = checked);
 }
@@ -114,6 +142,7 @@ function pollProgress() {
     if (!d.running) {
       clearInterval(iv);
       document.getElementById('cancel-download').style.display = 'none';
+      loadDownloadJobs();
     }
   }, 1000);
 }
