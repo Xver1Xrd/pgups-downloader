@@ -5,11 +5,14 @@ import json
 import time
 import base64
 import hashlib
+import hmac
+import secrets
 import threading
+from urllib.parse import urlsplit, parse_qs
 from pathlib import Path
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from flask import Flask, jsonify, render_template, request, session as flask_session
+from flask import Flask, jsonify, render_template, request, session as flask_session, abort
 
 sys.path.insert(0, str(Path(__file__).parent))
 from pgups_downloader import (
@@ -18,6 +21,7 @@ from pgups_downloader import (
     load_config, save_config, log,
 )
 from utils import count_statuses, cache_hash, clear_courses_cache
+from secret_store import save_password, get_password
 
 # Persistent secret key: stored in a file so sessions survive restarts
 _SECRET_KEY_FILE = Path(__file__).parent / ".secret_key"
@@ -32,6 +36,7 @@ def _load_secret_key() -> bytes:
     key = os.urandom(32)
     try:
         _SECRET_KEY_FILE.write_bytes(key)
+        _SECRET_KEY_FILE.chmod(0o600)
     except OSError:
         pass
     return key
@@ -41,10 +46,10 @@ def _check_web_auth():
     """Optional HTTP Basic Auth via WEB_AUTH env var (format: 'user:password')."""
     auth_env = os.environ.get("WEB_AUTH", "")
     if not auth_env:
-        return True
+        return request.remote_addr in ("127.0.0.1", "::1")
     parts = auth_env.split(":", 1)
-    if len(parts) != 2:
-        return True
+    if len(parts) != 2 or not all(parts):
+        return False
     expected_user, expected_pass = parts
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Basic "):
@@ -52,7 +57,7 @@ def _check_web_auth():
     try:
         decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
         user, password = decoded.split(":", 1)
-        return user == expected_user and password == expected_pass
+        return hmac.compare_digest(user, expected_user) and hmac.compare_digest(password, expected_pass)
     except Exception:
         return False
 
@@ -73,6 +78,7 @@ def require_auth(f):
 
 app = Flask(__name__)
 app.secret_key = _load_secret_key()
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict")
 
 dl = PgupsDownloader()
 courses_lock = threading.Lock()
@@ -87,7 +93,8 @@ CACHE_TTL = 300
 
 def get_creds() -> tuple[str, str]:
     cfg = load_config()
-    return cfg.get("login", ""), cfg.get("password", "")
+    login = cfg.get("login", "")
+    return login, get_password(login) or cfg.get("password", "")
 
 
 def ensure_auth():
@@ -123,7 +130,18 @@ def _load_course_names_parallel(courses_list: list[dict]) -> list[dict]:
 @app.before_request
 @require_auth
 def check_auth():
-    pass
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        token = flask_session.get("csrf", "")
+        supplied = request.headers.get("X-CSRF-Token", "")
+        if not token or not hmac.compare_digest(token, supplied):
+            abort(403)
+
+
+@app.context_processor
+def inject_csrf():
+    if "csrf" not in flask_session:
+        flask_session["csrf"] = secrets.token_urlsafe(32)
+    return {"csrf_token": flask_session["csrf"]}
 
 
 @app.after_request
@@ -159,7 +177,7 @@ def api_auth_captcha():
 
 @app.route("/api/auth/login", methods=["POST"])
 def api_auth_login():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     email = data.get("email", "").strip()
     password = data.get("password", "").strip()
     captcha = data.get("captcha", "").strip()
@@ -305,10 +323,17 @@ def api_download():
     ok = ensure_auth()
     if not ok:
         return jsonify({"error": "Нет авторизации"}), 401
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     course_ids = data.get("course_ids", [])
-    workers = data.get("workers", DEFAULT_WORKERS)
     download_type = data.get("download_type", "both")
+    try:
+        workers = int(data.get("workers", DEFAULT_WORKERS))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Некорректное количество потоков"}), 400
+    if not 1 <= workers <= 10 or download_type not in ("both", "submission", "attachment"):
+        return jsonify({"error": "Недопустимые параметры загрузки"}), 400
+    if not isinstance(course_ids, list) or any(not isinstance(x, str) for x in course_ids):
+        return jsonify({"error": "Некорректный список курсов"}), 400
 
     with courses_lock:
         if course_ids:
@@ -327,15 +352,13 @@ def api_download():
         download_status["progress"] = ""
 
     def run_dl():
-        with courses_lock:
-            original_courses = list(dl.courses)
-        original_workers = dl.workers
-        dl.courses = courses
-        dl.workers = workers
+        worker_dl = PgupsDownloader(courses=courses)
+        worker_dl.session.cookies.update(dl.session.cookies)
+        worker_dl.workers = workers
         try:
             log(f"\n[WEB] Скачивание {len(courses)} курсов ({workers} потоков)")
             download_status["message"] = "Сбор заданий..."
-            tasks = dl.collect_tasks(download_type=download_type)
+            tasks = worker_dl.collect_tasks(download_type=download_type)
             if not tasks:
                 download_status["message"] = "Нет файлов для скачивания"
                 download_status["progress"] = "0/0"
@@ -343,7 +366,7 @@ def api_download():
                 download_status["message"] = f"Скачивание {len(tasks)} файлов..."
                 downloaded = 0
                 with ThreadPoolExecutor(max_workers=workers) as pool:
-                    fut = {pool.submit(dl.download_file, url, name, folder): name
+                    fut = {pool.submit(worker_dl.download_file, url, name, folder): name
                            for url, name, folder in tasks}
                     total = len(fut)
                     for f in as_completed(fut):
@@ -357,10 +380,8 @@ def api_download():
             log(f"[WEB] Ошибка скачивания: {e}")
             download_status["message"] = f"Ошибка: {e}"
         finally:
-            with courses_lock:
-                dl.courses = original_courses
-            dl.workers = original_workers
-            download_status["running"] = False
+            with download_lock:
+                download_status["running"] = False
 
     t = threading.Thread(target=run_dl, daemon=True)
     t.start()
@@ -375,14 +396,15 @@ def api_download_status():
 
 @app.route("/api/settings/login", methods=["POST"])
 def api_settings_login():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     login = data.get("login", "").strip()
     password = data.get("password", "").strip()
     cfg = load_config()
     if login:
         cfg["login"] = login
     if password:
-        cfg["password"] = password
+        save_password(login or cfg.get("login", ""), password)
+        cfg.pop("password", None)
     save_config(cfg)
     log("[WEB] Логин/пароль сохранены")
     clear_courses_cache(_courses_cache)
@@ -400,15 +422,19 @@ def api_settings_courses():
         return jsonify({"courses": result})
 
     if request.method == "POST":
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         url = data.get("url", "").strip()
         if url.isdigit():
             url = f"{BASE_URL}/course/view.php?id={url}"
-        elif "course/view.php?id=" not in url:
-            return jsonify({"error": "Неверный формат"}), 400
-        course_id = url.split("=")[-1].split("&")[0]
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or parsed.hostname != "sdo.pgups.ru" or parsed.username or parsed.password or parsed.port not in (None, 443) or parsed.path != "/course/view.php":
+            return jsonify({"error": "Разрешены только ссылки на курсы sdo.pgups.ru"}), 400
+        course_id = parse_qs(parsed.query).get("id", [""])[0]
+        if not course_id.isascii() or not course_id.isdigit():
+            return jsonify({"error": "Некорректный ID курса"}), 400
+        url = f"{BASE_URL}/course/view.php?id={course_id}"
         new = {"id": course_id, "url": url}
-        if new in courses:
+        if any(c["id"] == course_id for c in courses):
             return jsonify({"error": "Курс уже добавлен"}), 409
         courses.append(new)
         cfg["courses"] = courses
@@ -420,7 +446,7 @@ def api_settings_courses():
         return jsonify({"status": "ok", "id": course_id})
 
     if request.method == "DELETE":
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         course_id = data.get("id")
         courses = [c for c in courses if c["id"] != course_id]
         cfg["courses"] = courses
