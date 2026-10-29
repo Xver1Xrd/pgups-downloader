@@ -91,6 +91,7 @@ last_check: dict[str, dict] = {}
 check_lock = threading.Lock()
 download_status = {"running": False, "message": "", "progress": ""}
 download_lock = threading.Lock()
+download_cancel = threading.Event()
 _courses_cache = {"data": None, "time": 0}
 CACHE_TTL = 300
 _scheduler_lock = threading.Lock()
@@ -254,8 +255,10 @@ def api_auth_captcha():
 @app.route("/api/auth/login", methods=["POST"])
 def api_auth_login():
     data = request.get_json(silent=True) or {}
+    if any(not isinstance(data.get(k, ""), str) for k in ("email","password","captcha","csrf_token")):
+        return jsonify({"error":"Некорректные параметры авторизации"}), 400
     email = data.get("email", "").strip()
-    password = data.get("password", "").strip()
+    password = data.get("password", "")
     captcha = data.get("captcha", "").strip()
     csrf_token = data.get("csrf_token", "").strip()
     remember = data.get("remember", False)
@@ -495,7 +498,8 @@ def api_download():
     with download_lock:
         if download_status["running"]:
             return jsonify({"error": "Скачивание уже выполняется"}), 409
-        download_status.update(running=True, message="Запуск...", progress="", downloaded=0, skipped=0, failed=0)
+        download_cancel.clear()
+        download_status.update(running=True, message="Запуск...", progress="", downloaded=0, skipped=0, failed=0, cancelled=False)
 
     def run_dl():
         worker_dl = PgupsDownloader(courses=courses)
@@ -513,7 +517,7 @@ def api_download():
                 failed = 0
                 skipped = 0
                 with ThreadPoolExecutor(max_workers=workers) as pool:
-                    fut = {pool.submit(worker_dl.download_file, url, name, folder): (url, name, folder)
+                    fut = {pool.submit(worker_dl.download_file, url, name, folder, cancel_event=download_cancel): (url, name, folder)
                            for url, name, folder in tasks}
                     total = len(fut)
                     for done, f in enumerate(as_completed(fut), 1):
@@ -532,7 +536,11 @@ def api_download():
                             failed += 1
                         store.record_download(url, name, str(folder / name), status, folder.parent.name)
                         set_download_status(progress=f"{done}/{total}", downloaded=downloaded, skipped=skipped, failed=failed)
-                set_download_status(message=f"Готово: {downloaded} загружено, {skipped} пропущено, {failed} ошибок", progress=f"{total}/{total}")
+                message = (f"Отменено: {downloaded} загружено, {skipped} пропущено, {failed} ошибок"
+                           if download_cancel.is_set() else
+                           f"Готово: {downloaded} загружено, {skipped} пропущено, {failed} ошибок")
+                set_download_status(message=message, progress=f"{total}/{total}",
+                                    cancelled=download_cancel.is_set())
         except Exception as e:
             log(f"[WEB] Ошибка скачивания: {e}")
             set_download_status(message=f"Ошибка: {e}")
@@ -544,6 +552,16 @@ def api_download():
     return jsonify({"status": "started"})
 
 
+@app.route("/api/download/cancel", methods=["POST"])
+def api_download_cancel():
+    with download_lock:
+        if not download_status["running"]:
+            return jsonify({"error":"Нет активной загрузки"}), 409
+        download_cancel.set()
+        download_status["message"] = "Отмена загрузки..."
+    return jsonify({"status":"cancelling"})
+
+
 @app.route("/api/download/status")
 def api_download_status():
     with download_lock:
@@ -553,8 +571,10 @@ def api_download_status():
 @app.route("/api/settings/login", methods=["POST"])
 def api_settings_login():
     data = request.get_json(silent=True) or {}
+    if not isinstance(data.get("login", ""), str) or not isinstance(data.get("password", ""), str):
+        return jsonify({"error":"Некорректный логин или пароль"}), 400
     login = data.get("login", "").strip()
-    password = data.get("password", "").strip()
+    password = data.get("password", "")
     cfg = load_config()
     if login:
         cfg["login"] = login
@@ -606,11 +626,20 @@ def api_settings_courses():
 
     if request.method == "POST":
         data = request.get_json(silent=True) or {}
-        url = data.get("url", "").strip()
-        if url.isdigit():
+        url = data.get("url", "")
+        if not isinstance(url, str):
+            return jsonify({"error":"Некорректный URL"}), 400
+        url = url.strip()
+        if url.isascii() and url.isdigit():
             url = f"{BASE_URL}/course/view.php?id={url}"
-        parsed = urlsplit(url)
-        if parsed.scheme != "https" or parsed.hostname != "sdo.pgups.ru" or parsed.username or parsed.password or parsed.port not in (None, 443) or parsed.path != "/course/view.php":
+        try:
+            parsed = urlsplit(url)
+            valid = (parsed.scheme == "https" and parsed.hostname == "sdo.pgups.ru"
+                     and not parsed.username and not parsed.password
+                     and parsed.port in (None, 443) and parsed.path == "/course/view.php")
+        except ValueError:
+            valid = False
+        if not valid:
             return jsonify({"error": "Разрешены только ссылки на курсы sdo.pgups.ru"}), 400
         course_id = parse_qs(parsed.query).get("id", [""])[0]
         if not course_id.isascii() or not course_id.isdigit():
