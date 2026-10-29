@@ -922,6 +922,8 @@ class PgupsDownloader:
         return rows_data, course_name
 
     def check_all(self):
+        from storage import Store
+        store = Store()
         log("\n" + "=" * 55)
         log("PGUPS — Проверка успеваемости")
         log("=" * 55)
@@ -930,6 +932,7 @@ class PgupsDownloader:
             results, course_name = self.check_course(course["url"])
             if not results:
                 continue
+            store.snapshot_course(course["id"], course_name, results)
             log(f"\n── {course_name} ──")
             passed = failed = submitted = locked = pending = 0
             for r in results:
@@ -960,6 +963,8 @@ class PgupsDownloader:
             while True:
                 results, _ = self.check_course(course_url)
                 curr = fmt(results)
+                from storage import Store
+                Store().snapshot_course(course_id, course_name, results)
                 timestamp = time.strftime("%H:%M:%S")
 
                 if first:
@@ -1095,13 +1100,23 @@ class PgupsDownloader:
 
         log(f"\n── Скачивание ({len(tasks)} файлов, {self.workers} потоков) ──")
 
+        from storage import Store
+        index = Store()
         downloaded = 0
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
-            fut = {pool.submit(self.download_file, url, name, folder): name
+            fut = {pool.submit(self.download_file, url, name, folder): (url, name, folder)
                    for url, name, folder in tasks}
             for f in as_completed(fut):
-                if f.result():
+                url, name, folder = fut[f]
+                try:
+                    success = f.result()
+                except Exception as exc:
+                    log(f"[!] Ошибка скачивания {name}: {exc}")
+                    success = False
+                if success:
                     downloaded += 1
+                status = "downloaded" if success else ("skipped" if (folder / name).is_file() else "failed")
+                index.record_download(url, name, str(folder / name), status, folder.parent.name)
 
         log(f"\n{'=' * 55}")
         skipped = len(tasks) - downloaded
@@ -1178,6 +1193,9 @@ def main():
         if args.course:
             url = f"{BASE_URL}/course/view.php?id={args.course}"
             results, name = dl.check_course(url)
+            from storage import Store
+            if results:
+                Store().snapshot_course(args.course, name, results)
             log(f"\n── {name} ──")
             for r in results:
                 log(f"  {r['status']}  {r['name']}")
