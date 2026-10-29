@@ -90,6 +90,7 @@ def require_auth(f):
 
 app = Flask(__name__)
 store = Store()
+store.interrupt_unfinished_jobs()
 app.secret_key = _load_secret_key()
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict")
 
@@ -125,6 +126,17 @@ def notify_events(events: list[dict]):
 def set_download_status(**changes):
     with download_lock:
         download_status.update(changes)
+        snapshot = dict(download_status)
+    job_id = snapshot.get("job_id")
+    if job_id:
+        try:
+            parts = (snapshot.get("progress") or "0/0").split("/")
+            done, total = int(parts[0]), int(parts[1])
+            store.update_job(job_id, snapshot.get("state", "running"), total, done,
+                             snapshot.get("downloaded",0),snapshot.get("skipped",0),
+                             snapshot.get("failed",0))
+        except (ValueError, IndexError, OSError) as exc:
+            log(f"[JOBS] Ошибка обновления журнала: {exc}")
 
 
 def start_scheduler():
@@ -504,7 +516,11 @@ def api_download():
         if download_status["running"]:
             return jsonify({"error": "Скачивание уже выполняется"}), 409
         download_cancel.clear()
-        download_status.update(running=True, message="Запуск...", progress="", downloaded=0, skipped=0, failed=0, cancelled=False)
+        job_id = secrets.token_hex(12)
+        store.create_job(job_id)
+        download_status.update(job_id=job_id, state="preparing", running=True,
+                               message="Запуск...", progress="", downloaded=0,
+                               skipped=0, failed=0, cancelled=False)
 
     def run_dl():
         worker_dl = PgupsDownloader(courses=courses)
@@ -512,12 +528,13 @@ def api_download():
         worker_dl.workers = workers
         try:
             log(f"\n[WEB] Скачивание {len(courses)} курсов ({workers} потоков)")
-            set_download_status(message="Сбор заданий...")
+            set_download_status(message="Сбор заданий...", state="preparing")
             tasks = worker_dl.collect_tasks(download_type=download_type)
             if not tasks:
-                set_download_status(message="Нет файлов для скачивания", progress="0/0")
+                set_download_status(message="Нет файлов для скачивания", progress="0/0", state="complete")
             else:
-                set_download_status(message=f"Скачивание {len(tasks)} файлов...")
+                set_download_status(message=f"Скачивание {len(tasks)} файлов...",
+                                    progress=f"0/{len(tasks)}",state="running")
                 downloaded = 0
                 failed = 0
                 skipped = 0
@@ -545,16 +562,24 @@ def api_download():
                            if download_cancel.is_set() else
                            f"Готово: {downloaded} загружено, {skipped} пропущено, {failed} ошибок")
                 set_download_status(message=message, progress=f"{total}/{total}",
-                                    cancelled=download_cancel.is_set())
+                                    cancelled=download_cancel.is_set(),
+                                    state="cancelled" if download_cancel.is_set() else "complete")
         except Exception as e:
             log(f"[WEB] Ошибка скачивания: {e}")
-            set_download_status(message=f"Ошибка: {e}")
+            set_download_status(message=f"Ошибка: {e}",state="failed")
         finally:
-            set_download_status(running=False)
+            set_download_status(running=False,
+                                state=("cancelled" if download_cancel.is_set() else
+                                       download_status.get("state","failed")))
 
     t = threading.Thread(target=run_dl, daemon=True)
     t.start()
-    return jsonify({"status": "started"})
+    return jsonify({"status": "started", "job_id": job_id})
+
+
+@app.route("/api/download/jobs")
+def api_download_jobs():
+    return jsonify({"jobs":store.recent_jobs()})
 
 
 @app.route("/api/download/cancel", methods=["POST"])
@@ -564,6 +589,7 @@ def api_download_cancel():
             return jsonify({"error":"Нет активной загрузки"}), 409
         download_cancel.set()
         download_status["message"] = "Отмена загрузки..."
+        download_status["state"] = "cancelling"
     return jsonify({"status":"cancelling"})
 
 
