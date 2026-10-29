@@ -54,6 +54,12 @@ def sanitize(name: str, strip_задание: bool = False) -> str:
     return name or "untitled"
 
 
+def public_url(url: str) -> str:
+    """Log origins and paths without exposing SSO query parameters or fragments."""
+    parsed = urlsplit(url)
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+
 def trusted_moodle_url(url: str) -> bool:
     """Only accept HTTPS links to the Moodle origin (no userinfo or custom ports)."""
     try:
@@ -425,7 +431,7 @@ class PgupsDownloader:
                     "remember": "on" if remember else "",
                 }
 
-                log(f"[*] Отправка формы входа на my.pgups.ru (капча: {captcha_text})…")
+                log("[*] Отправка формы входа на my.pgups.ru…")
                 r2 = self.post(
                     f"{MY_BASE_URL}/login",
                     data=data,
@@ -441,11 +447,11 @@ class PgupsDownloader:
                 if not is_success and ("/verify" in r2.url.lower() or "/captcha" in r2.url.lower()):
                     log(f"[✗] Капча неверна, редирект на /verify — пробуем снова")
                 if is_success:
-                    log(f"[*] Редирект на: {r2.url}")
+                    log(f"[*] Редирект на: {public_url(r2.url)}")
                     log(f"[DEBUG] cookies после входа: {[(c.name, c.domain) for c in self.session.cookies]}")
                     log("[*] Запуск SSO через my.pgups.ru/auth/sdo…")
                     sso_r = self.get(f"{MY_BASE_URL}/auth/sdo", timeout=15, allow_redirects=True)
-                    log(f"[DEBUG] SSO response: url={sso_r.url}, status={sso_r.status_code}")
+                    log(f"[DEBUG] SSO response: url={public_url(sso_r.url)}, status={sso_r.status_code}")
                     log(f"[DEBUG] cookies после SSO: {[(c.name, c.domain) for c in self.session.cookies]}")
                     log(f"[DEBUG] cookies после SSO (перед сохранением): {[(c.name, c.domain) for c in self.session.cookies]}")
                     if self.verify_auth():
@@ -457,7 +463,7 @@ class PgupsDownloader:
                     log(f"[DEBUG] verify_auth упал, пробуем принудительный переход на sdo.pgups.ru")
                     try:
                         force_r = self.get(f"{BASE_URL}/my/", timeout=10, allow_redirects=True)
-                        log(f"[DEBUG] Принудительный переход: url={force_r.url}")
+                        log(f"[DEBUG] Принудительный переход: url={public_url(force_r.url)}")
                         if self.verify_auth():
                             self._save_session_cookies()
                             success = True
