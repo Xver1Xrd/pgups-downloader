@@ -113,7 +113,11 @@ class PgupsDownloader:
             "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         })
         self.config = load_config()
-        self.courses = list(courses if courses is not None else self.config.get("courses", []))
+        defaults = [
+            {"id": cid, "url": f"{BASE_URL}/course/view.php?id={cid}"}
+            for cid in ("4388", "7036", "7031", "6920", "6467", "6964", "7039", "7009")
+        ]
+        self.courses = list(courses if courses is not None else self.config.get("courses", defaults))
         self.workers = DEFAULT_WORKERS
         self._owner_thread = threading.get_ident()
         self._thread_local = threading.local()
@@ -566,6 +570,10 @@ class PgupsDownloader:
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
         filename = safe_filename(filename)
+        parsed_url = urlsplit(url)
+        if parsed_url.scheme != "https" or parsed_url.hostname != "sdo.pgups.ru" or parsed_url.username or parsed_url.password:
+            log("[!] Заблокирован URL скачивания вне sdo.pgups.ru")
+            return False
         filepath = folder / filename
 
         for attempt in range(max(1, max_retries)):
