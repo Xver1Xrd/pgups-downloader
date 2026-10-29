@@ -663,7 +663,9 @@ class PgupsDownloader:
         except OSError:
             return None
 
-    def download_file(self, url: str, filename: str, folder: Path, max_retries: int = MAX_RETRIES) -> bool:
+    def download_file(self, url: str, filename: str, folder: Path,
+                      max_retries: int = MAX_RETRIES,
+                      cancel_event: threading.Event | None = None) -> bool:
         """Stream to a private temporary file, verify, then atomically replace."""
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
@@ -675,6 +677,8 @@ class PgupsDownloader:
         filepath = folder / filename
 
         for attempt in range(max(1, max_retries)):
+            if cancel_event is not None and cancel_event.is_set():
+                return False
             tmp_path = None
             try:
                 # Never overwrite a symlink outside the intended directory.
@@ -693,6 +697,8 @@ class PgupsDownloader:
                         new_hash = hashlib.sha256()
                         total = 0
                         for chunk in r.iter_content(chunk_size=65536):
+                            if cancel_event is not None and cancel_event.is_set():
+                                return False
                             if not chunk:
                                 continue
                             target.write(chunk)
@@ -722,6 +728,8 @@ class PgupsDownloader:
                         log(f"    уже есть: {existing.name}")
                         return False
 
+                if cancel_event is not None and cancel_event.is_set():
+                    return False
                 if filepath.is_symlink():
                     raise ValueError("Целевой путь стал символической ссылкой")
                 os.replace(tmp_path, filepath)
