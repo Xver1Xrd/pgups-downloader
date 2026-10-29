@@ -197,6 +197,15 @@ a:hover { text-decoration: underline; }
 </div>
 <div class="footer">made by <a href="https://github.com/Xver1Xrd" target="_blank">xverlxrd</a></div>
 <script>
+window.CSRF_TOKEN = {{ csrf_token|tojson }};
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (url, options = {}) => {
+  const method = (options.method || 'GET').toUpperCase();
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && typeof url === 'string' && url.startsWith('/')) {
+    options = {...options, headers: {...options.headers, 'X-CSRF-Token': window.CSRF_TOKEN}};
+  }
+  return nativeFetch(url, options);
+};
 function flash(msg, type) {
   const c = document.getElementById('flash-container');
   const d = document.createElement('div');
