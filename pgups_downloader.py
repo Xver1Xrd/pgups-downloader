@@ -1071,7 +1071,8 @@ def main():
         return
 
     if args.web:
-        from web_app import app
+        from web_app import app, start_scheduler
+        start_scheduler()
         app.run(host="127.0.0.1", port=args.port, debug=False)
         return
 
