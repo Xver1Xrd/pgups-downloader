@@ -55,9 +55,12 @@ class Store:
     def __init__(self, path: Path = DEFAULT_DATABASE):
         self.path = Path(path)
         self._lock = threading.RLock()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if self.path.parent.name == "pgups-downloader":
+            self.path.parent.chmod(0o700)
         with self._connection() as conn:
             conn.executescript(_SCHEMA)
+        self.path.chmod(0o600)
 
     @contextmanager
     def _connection(self):
@@ -118,6 +121,29 @@ class Store:
                     (course_id,item_id,item["name"],new,item.get("deadline"),now)
                 )
         return events
+
+    def cached_courses(self) -> list[dict]:
+        """Read the last successful grade snapshot without any network access."""
+        with self._lock, self._connection() as conn:
+            courses = [dict(row) for row in conn.execute(
+                "SELECT id,name,updated_at FROM courses ORDER BY name"
+            )]
+            items = [dict(row) for row in conn.execute(
+                "SELECT course_id,item_id AS id,name,status,deadline FROM items ORDER BY name"
+            )]
+        indexed = {}
+        for item in items:
+            indexed.setdefault(item.pop("course_id"), []).append(item)
+        result = []
+        for course in courses:
+            rows = indexed.get(course["id"], [])
+            counts = {"passed":0,"failed":0,"submitted":0,"locked":0,"pending":0}
+            for item in rows:
+                symbol = (item.get("status") or ".")[:1]
+                key = {"+":"passed","-":"failed","~":"submitted","#":"locked"}.get(symbol,"pending")
+                counts[key] += 1
+            result.append({**course,**counts,"items":rows,"stale":True})
+        return result
 
     def history(self, limit: int = 100) -> list[dict]:
         limit = max(1,min(int(limit),500))
