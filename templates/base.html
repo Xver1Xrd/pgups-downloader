@@ -60,9 +60,9 @@ a:hover { text-decoration: underline; }
 @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
 
 .header { background: var(--surface); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 50; }
-.header-inner { max-width: 1200px; margin: 0 auto; display: flex; align-items: center; height: 56px; padding: 0 20px; gap: 24px; }
+.header-inner { max-width: 1200px; margin: 0 auto; display: flex; align-items: center; min-height: 56px; padding: 0 20px; gap: 24px; }
 .header-brand { font-weight: 700; font-size: 16px; color: var(--text); letter-spacing: -.3px; }
-.header-nav { display: flex; gap: 2px; }
+.header-nav { display: flex; gap: 2px; overflow-x: auto; white-space: nowrap; scrollbar-width: thin; }
 .header-nav a { color: var(--text-secondary); padding: 6px 12px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; text-decoration: none; transition: background .15s, color .15s; }
 .header-nav a:hover { background: var(--bg); color: var(--text); }
 .header-nav a.active { background: var(--accent-light); color: var(--accent); }
@@ -185,6 +185,9 @@ a:hover { text-decoration: underline; }
     <nav class="header-nav">
       <a href="/" class="{% if request.path == '/' %}active{% endif %}">Успеваемость</a>
       <a href="/download" class="{% if request.path == '/download' %}active{% endif %}">Скачивание</a>
+      <a href="/calendar" class="{% if request.path == '/calendar' %}active{% endif %}">Дедлайны</a>
+      <a href="/history" class="{% if request.path == '/history' %}active{% endif %}">История</a>
+      <a href="/files" class="{% if request.path == '/files' %}active{% endif %}">Файлы</a>
       <a href="/add-course" class="{% if request.path == '/add-course' %}active{% endif %}">Добавить курс</a>
       <a href="/settings" class="{% if request.path == '/settings' %}active{% endif %}">Настройки</a>
     </nav>
