@@ -5,7 +5,7 @@
 
 <div class="card">
   <div class="card-title">Выберите курсы</div>
-  <div style="display:flex;flex-direction:column;gap:6px;">
+  <div id="course-list" style="display:flex;flex-direction:column;gap:6px;">
     {% for c in courses %}
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
       <input type="checkbox" value="{{ c.id }}" style="width:16px;height:16px;cursor:pointer;">
