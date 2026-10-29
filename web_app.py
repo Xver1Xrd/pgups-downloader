@@ -8,6 +8,8 @@ import hashlib
 import hmac
 import secrets
 import threading
+import subprocess
+from datetime import datetime
 from urllib.parse import urlsplit, parse_qs
 from pathlib import Path
 from functools import wraps
@@ -22,6 +24,8 @@ from pgups_downloader import (
 )
 from utils import count_statuses, cache_hash, clear_courses_cache
 from secret_store import save_password, get_password
+from storage import Store
+from calendar_utils import create_ics, parse_deadline
 
 # Persistent secret key: stored in a file so sessions survive restarts
 _SECRET_KEY_FILE = Path(__file__).parent / ".secret_key"
@@ -76,6 +80,7 @@ def require_auth(f):
 
 
 app = Flask(__name__)
+store = Store()
 app.secret_key = _load_secret_key()
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict")
 
@@ -88,6 +93,62 @@ download_status = {"running": False, "message": "", "progress": ""}
 download_lock = threading.Lock()
 _courses_cache = {"data": None, "time": 0}
 CACHE_TTL = 300
+_scheduler_lock = threading.Lock()
+_scheduler_started = False
+
+
+def notify_events(events: list[dict]):
+    if not events or not load_config().get("desktop_notifications", False):
+        return
+    for event in events[:5]:
+        try:
+            subprocess.run(
+                ["notify-send", "--app-name=PGUPS Downloader",
+                 "Изменение в ЭИОС ПГУПС",
+                 f"{event['course_name']}: {event['item_name']} — {event['new_status']}"],
+                timeout=3, check=False, capture_output=True
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return
+
+
+def set_download_status(**changes):
+    with download_lock:
+        download_status.update(changes)
+
+
+def start_scheduler():
+    """Start an opt-in, rate-limited periodic grade sync in local web mode."""
+    global _scheduler_started
+    with _scheduler_lock:
+        if _scheduler_started:
+            return
+        _scheduler_started = True
+    def scheduler():
+        last = 0.0
+        while True:
+            time.sleep(60)
+            cfg = load_config()
+            if not cfg.get("auto_sync", False):
+                continue
+            interval = max(15, int(cfg.get("sync_interval_minutes", 30) or 30))
+            if time.monotonic() - last < interval * 60:
+                continue
+            last = time.monotonic()
+            try:
+                with auth_lock:
+                    if not dl.verify_auth():
+                        continue
+                    cookies = list(dl.session.cookies)
+                    headers = dict(dl.session.headers)
+                with courses_lock:
+                    courses = list(dl.courses)
+                for course in courses:
+                    fetch_one_course(course, cookies, headers)
+                clear_courses_cache(_courses_cache)
+            except Exception as exc:
+                log(f"[SYNC] Ошибка фоновой проверки: {exc}")
+    threading.Thread(target=scheduler, daemon=True, name="pgups-auto-sync").start()
 
 
 def get_creds() -> tuple[str, str]:
@@ -246,6 +307,8 @@ def fetch_one_course(course: dict, cookies: list = None, headers: dict = None) -
         rows, name = tmp_dl.check_course(course["url"])
     except Exception as e:
         return {"id": course["id"], "name": f"Ошибка: {e}", "error": True}
+    events = store.snapshot_course(str(course["id"]), name, rows)
+    notify_events(events)
     stats = count_statuses(rows)
     stats["items"] = rows
     stats["url"] = course["url"]
@@ -321,11 +384,73 @@ def api_course(course_id):
         rows, name = dl.check_course(course["url"])
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    events = store.snapshot_course(str(course_id), name, rows)
+    notify_events(events)
     stats = count_statuses(rows)
     stats["id"] = course_id
     stats["name"] = name
     stats["items"] = rows
     return jsonify(stats)
+
+
+@app.route("/history")
+def history_page():
+    return render_template("history.html")
+
+
+@app.route("/calendar")
+def calendar_page():
+    return render_template("calendar.html")
+
+
+@app.route("/files")
+def files_page():
+    return render_template("files.html")
+
+
+@app.route("/api/history")
+def api_history():
+    return jsonify({"events": store.history()})
+
+
+@app.route("/api/calendar")
+def api_calendar():
+    items = store.deadlines()
+    for item in items:
+        parsed = parse_deadline(item.get("deadline"))
+        item["deadline_iso"] = parsed.isoformat() if parsed else None
+    return jsonify({"deadlines": items})
+
+
+@app.route("/api/calendar.ics")
+def api_calendar_ics():
+    from flask import Response
+    return Response(create_ics(store.deadlines()), content_type="text/calendar; charset=utf-8",
+                    headers={"Content-Disposition": "attachment; filename=pgups-deadlines.ics"})
+
+
+@app.route("/api/files")
+def api_files():
+    return jsonify({"files": store.downloaded_files()})
+
+
+@app.route("/api/settings/automation", methods=["GET", "POST"])
+def api_automation():
+    cfg = load_config()
+    if request.method == "GET":
+        return jsonify({"auto_sync": cfg.get("auto_sync", False),
+                        "sync_interval_minutes": cfg.get("sync_interval_minutes", 30),
+                        "desktop_notifications": cfg.get("desktop_notifications", False)})
+    data = request.get_json(silent=True) or {}
+    minutes = data.get("sync_interval_minutes", 30)
+    if type(minutes) is not int or not 15 <= minutes <= 1440:
+        return jsonify({"error": "Интервал синхронизации: от 15 до 1440 минут"}), 400
+    if any(type(data.get(key)) is not bool for key in ("auto_sync", "desktop_notifications")):
+        return jsonify({"error": "Некорректные настройки"}), 400
+    cfg.update(auto_sync=data["auto_sync"], sync_interval_minutes=minutes,
+               desktop_notifications=data["desktop_notifications"])
+    save_config(cfg)
+    return jsonify({"status": "ok"})
 
 
 @app.route("/api/download", methods=["POST"])
@@ -357,9 +482,7 @@ def api_download():
     with download_lock:
         if download_status["running"]:
             return jsonify({"error": "Скачивание уже выполняется"}), 409
-        download_status["running"] = True
-        download_status["message"] = "Запуск..."
-        download_status["progress"] = ""
+        download_status.update(running=True, message="Запуск...", progress="", downloaded=0, skipped=0, failed=0)
 
     def run_dl():
         worker_dl = PgupsDownloader(courses=courses)
@@ -367,31 +490,41 @@ def api_download():
         worker_dl.workers = workers
         try:
             log(f"\n[WEB] Скачивание {len(courses)} курсов ({workers} потоков)")
-            download_status["message"] = "Сбор заданий..."
+            set_download_status(message="Сбор заданий...")
             tasks = worker_dl.collect_tasks(download_type=download_type)
             if not tasks:
-                download_status["message"] = "Нет файлов для скачивания"
-                download_status["progress"] = "0/0"
+                set_download_status(message="Нет файлов для скачивания", progress="0/0")
             else:
-                download_status["message"] = f"Скачивание {len(tasks)} файлов..."
+                set_download_status(message=f"Скачивание {len(tasks)} файлов...")
                 downloaded = 0
+                failed = 0
+                skipped = 0
                 with ThreadPoolExecutor(max_workers=workers) as pool:
-                    fut = {pool.submit(worker_dl.download_file, url, name, folder): name
+                    fut = {pool.submit(worker_dl.download_file, url, name, folder): (url, name, folder)
                            for url, name, folder in tasks}
                     total = len(fut)
-                    for f in as_completed(fut):
-                        if f.result():
+                    for done, f in enumerate(as_completed(fut), 1):
+                        url, name, folder = fut[f]
+                        try:
+                            success = f.result()
+                            status = "downloaded" if success else ("skipped" if (folder / name).is_file() else "failed")
+                        except Exception as exc:
+                            log(f"[WEB] Ошибка файла {name}: {exc}")
+                            status = "failed"
+                        if status == "downloaded":
                             downloaded += 1
-                        done = sum(1 for ff in fut if ff.done())
-                        download_status["progress"] = f"{done}/{total}"
-                download_status["message"] = f"Готово! Скачано: {downloaded}, пропущено: {total - downloaded}"
-                download_status["progress"] = f"{total}/{total}"
+                        elif status == "skipped":
+                            skipped += 1
+                        else:
+                            failed += 1
+                        store.record_download(url, name, str(folder / name), status, folder.parent.name)
+                        set_download_status(progress=f"{done}/{total}", downloaded=downloaded, skipped=skipped, failed=failed)
+                set_download_status(message=f"Готово: {downloaded} загружено, {skipped} пропущено, {failed} ошибок", progress=f"{total}/{total}")
         except Exception as e:
             log(f"[WEB] Ошибка скачивания: {e}")
-            download_status["message"] = f"Ошибка: {e}"
+            set_download_status(message=f"Ошибка: {e}")
         finally:
-            with download_lock:
-                download_status["running"] = False
+            set_download_status(running=False)
 
     t = threading.Thread(target=run_dl, daemon=True)
     t.start()
@@ -489,4 +622,5 @@ if __name__ == "__main__":
         ensure_auth()
     port = int(os.environ.get("PORT", 5000))
     log(f"[WEB] Сервер запущен на http://127.0.0.1:{port}")
+    start_scheduler()
     app.run(host="127.0.0.1", port=port, debug=False)
