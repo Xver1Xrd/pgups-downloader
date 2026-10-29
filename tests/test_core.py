@@ -137,3 +137,29 @@ def test_web_rejects_untrusted_course_url(monkeypatch, url):
             sess["csrf"] = "test-token"
         resp = client.post("/api/settings/courses", json={"url":url}, headers={"X-CSRF-Token":"test-token"})
         assert resp.status_code == 400
+
+
+def test_moodle_link_allowlist():
+    from pgups_downloader import trusted_moodle_url
+    assert trusted_moodle_url("https://sdo.pgups.ru/mod/assign/view.php?id=5")
+    assert not trusted_moodle_url("http://sdo.pgups.ru/mod/assign/view.php?id=5")
+    assert not trusted_moodle_url("https://evil.example/mod/assign/view.php?id=5")
+    assert not trusted_moodle_url("https://sdo.pgups.ru.evil.example/pluginfile.php")
+    assert not trusted_moodle_url("https://sdo.pgups.ru:444/pluginfile.php")
+
+
+def test_moodle_html_rejects_offsite_assignments(monkeypatch, tmp_path):
+    import pgups_downloader as module
+    monkeypatch.setattr(module, "COOKIES_FILE", tmp_path / "nonexistent")
+    monkeypatch.setattr(module, "load_config", lambda: {"courses":[]})
+    dl = module.PgupsDownloader()
+    class FakeResponse:
+        text = (
+            '<a href="https://evil.example/mod/assign/view.php?id=33">Outside</a>'
+            '<a href="/mod/assign/view.php?id=34">Inside</a>'
+        )
+        def raise_for_status(self): pass
+    monkeypatch.setattr(dl, "get", lambda *args, **kwargs: FakeResponse())
+    assignments = dl.get_assignments_from_course("https://sdo.pgups.ru/course/view.php?id=10")
+    assert len(assignments) == 1
+    assert assignments[0]["id"] == "34"
