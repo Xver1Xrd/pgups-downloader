@@ -235,7 +235,12 @@ def api_auth_status():
 
 @app.route("/api/auth/captcha")
 def api_auth_captcha():
-    data = dl.get_captcha()
+    with auth_lock:
+        data = dl.get_captcha()
+        if data:
+            # CAPTCHA and CSRF token are bound to the portal cookie/session.
+            # The subsequent login POST may run on a different Flask worker.
+            dl.publish_session_cookies()
     if not data:
         return jsonify({"error": "Не удалось загрузить страницу входа"}), 502
     captcha_b64 = base64.b64encode(data["captcha_data"]).decode() if data.get("captcha_data") else ""
