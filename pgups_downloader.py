@@ -807,34 +807,35 @@ class PgupsDownloader:
                     status = f"- Неуд ({score})"
                 else:
                     status = f"? {grade_raw}"
-                rows_data.append({"name": name, "status": status})
+                rows_data.append({"id": cm_id or name, "name": name, "status": status, "url": assign_url})
             elif locked:
-                rows_data.append({"name": name, "status": "# заблокирован"})
+                rows_data.append({"id": cm_id or name, "name": name, "status": "# заблокирован", "url": assign_url})
             elif type_prefix == "Задание" and assign_url:
                 check_submission.append({
+                    "id": cm_id or name,
                     "name": name,
                     "url": assign_url,
                 })
             else:
-                rows_data.append({"name": name, "status": ". не пройдено"})
+                rows_data.append({"id": cm_id or name, "name": name, "status": ". не пройдено", "url": assign_url})
 
         if check_submission:
             with ThreadPoolExecutor(max_workers=5) as pool:
                 fut = {
-                    pool.submit(self._check_submission_and_deadline, item["url"]): item["name"]
+                    pool.submit(self._check_submission_and_deadline, item["url"]): item["url"]
                     for item in check_submission
                 }
                 results = {}
                 for f in as_completed(fut):
-                    name = fut[f]
+                    url = fut[f]
                     has_sub, dl = f.result()
-                    results[name] = (has_sub, dl)
+                    results[url] = (has_sub, dl)
             for item in check_submission:
-                has_sub, dl = results.get(item["name"], (False, None))
+                has_sub, dl = results.get(item["url"], (False, None))
                 if has_sub:
-                    rows_data.append({"name": item["name"], "status": "~ сдано / не проверено"})
+                    rows_data.append({"id": item["id"], "name": item["name"], "status": "~ сдано / не проверено", "url": item["url"]})
                 else:
-                    rows_data.append({"name": item["name"], "status": ". не сдано"})
+                    rows_data.append({"id": item["id"], "name": item["name"], "status": ". не сдано", "url": item["url"]})
                 if dl:
                     rows_data[-1]["deadline"] = dl
 
