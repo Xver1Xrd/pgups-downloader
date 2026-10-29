@@ -14,9 +14,12 @@
 {% endblock %}
 {% block scripts %}
 <script>
-const courseId = '{{ course_id }}';
+const courseId = {{ course_id|tojson }};
 let prevItems = {};
 
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[ch]));
+}
 function render(data) {
   document.getElementById('course-title').textContent = data.name;
   document.getElementById('stats').innerHTML = `
@@ -31,10 +34,10 @@ function render(data) {
     const old = prevItems[i.name];
     const changed = old && old !== i.status;
     const cls = changed ? 'item-row changed' : 'item-row';
-    const prevHtml = changed ? `<span class="item-prev">← ${old}</span>` : '';
+    const prevHtml = changed ? `<span class="item-prev">← ${escapeHtml(old)}</span>` : '';
     if (!prevItems[i.name]) prevItems[i.name] = i.status;
     else if (changed) prevItems[i.name] = i.status;
-    return `<div class="${cls}"><span class="item-name">${i.name}</span><span class="item-status">${i.status}${prevHtml}</span></div>`;
+    return `<div class="${cls}"><span class="item-name">${escapeHtml(i.name)}</span><span class="item-status">${escapeHtml(i.status)}${prevHtml}</span></div>`;
   }).join('');
 }
 
