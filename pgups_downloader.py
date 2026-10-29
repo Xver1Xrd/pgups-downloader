@@ -78,6 +78,19 @@ def safe_filename(name: str) -> str:
     return sanitize(name)
 
 
+def safe_child_dir(parent: Path, name: str) -> Path:
+    """Prevent symlink-based folder traversal from Moodle-controlled names."""
+    parent = Path(parent)
+    parent.mkdir(parents=True, exist_ok=True)
+    child = parent / sanitize(name)
+    if child.is_symlink():
+        raise ValueError("Каталог курса/задания не может быть символической ссылкой")
+    if not child.resolve().is_relative_to(parent.resolve()):
+        raise ValueError("Выход за пределы каталога PGUPS")
+    child.mkdir(exist_ok=True)
+    return child
+
+
 def _atomic_private_write(path: Path, contents: str):
     """Never expose partially-written credential/cookie files."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1042,9 +1055,12 @@ class PgupsDownloader:
         tasks = []
         for course in self.courses:
             course_name = self.get_course_name(course["url"])
-            course_folder = DOWNLOAD_BASE / course_name
+            try:
+                course_folder = safe_child_dir(DOWNLOAD_BASE, course_name)
+            except ValueError as exc:
+                log(f"[!] Пропущен опасный каталог курса: {exc}")
+                continue
             course_count = 0
-            course_folder.mkdir(parents=True, exist_ok=True)
             log(f"\n── {course_name} ──")
 
             assignments = self.get_assignments_from_course(course["url"])
@@ -1054,7 +1070,11 @@ class PgupsDownloader:
 
             for assign in assignments:
                 assign_name = sanitize(assign["name"], strip_задание=True)
-                assign_folder = course_folder / assign_name if assign_name else course_folder
+                try:
+                    assign_folder = safe_child_dir(course_folder, assign_name) if assign_name else course_folder
+                except ValueError as exc:
+                    log(f"[!] Пропущен опасный каталог задания: {exc}")
+                    continue
 
                 if download_type in ("submission", "both"):
                     files = self.get_submission_files(assign["url"])
