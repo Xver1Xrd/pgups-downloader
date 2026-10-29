@@ -109,6 +109,8 @@ def test_offline_course_fallback(monkeypatch, tmp_path):
     store = Store(tmp_path / "offline.sqlite3")
     store.snapshot_course("77","Offline course",[{"id":"1","name":"Task","status":"+ отлично"}])
     monkeypatch.setattr(web_app, "store", store)
+    monkeypatch.setattr(web_app.dl, "courses", [{"id":"77","url":"https://sdo.pgups.ru/course/view.php?id=77"}])
+    web_app._courses_cache["data"] = None
     monkeypatch.setattr(web_app, "ensure_auth", lambda: False)
     monkeypatch.setattr(web_app, "_check_web_auth", lambda: True)
     with web_app.app.test_client() as client:
