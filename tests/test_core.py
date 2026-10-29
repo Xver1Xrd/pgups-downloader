@@ -194,3 +194,15 @@ def test_secure_cookies_preserve_attributes(monkeypatch,tmp_path):
     next_dl = module.PgupsDownloader()
     cookie = next(c for c in next_dl.session.cookies if c.name == "MoodleSession")
     assert cookie.secure is True
+
+
+def test_safe_course_dir_rejects_symlink(tmp_path):
+    from pgups_downloader import safe_child_dir
+    base = tmp_path / "downloads"
+    base.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (base / "malicious").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError):
+        safe_child_dir(base, "malicious")
+    assert safe_child_dir(base, "normal").is_dir()
