@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -58,11 +59,19 @@ class Store:
         with self._connection() as conn:
             conn.executescript(_SCHEMA)
 
+    @contextmanager
     def _connection(self):
         conn = sqlite3.connect(str(self.path), timeout=15)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=15000")
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def snapshot_course(self, course_id: str, course_name: str, items: list[dict]) -> list[dict]:
         """Persist a snapshot and return actual status transitions, excluding initial import."""
