@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Europe/Moscow")
@@ -52,7 +52,7 @@ def create_ics(items: list[dict]) -> str:
             "BEGIN:VEVENT",
             f"UID:{_esc(uid)}",
             f"DTSTAMP:{now}",
-            f"DTSTART;TZID=Europe/Moscow:{dt.strftime('%Y%m%dT%H%M%S')}",
+            f"DTSTART:{dt.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
             f"SUMMARY:{_esc(item['name'])}",
             f"DESCRIPTION:{_esc(item['course_name'])} — {_esc(item['status'])}",
             "END:VEVENT",
