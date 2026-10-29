@@ -48,6 +48,18 @@ CREATE TABLE IF NOT EXISTS downloads(
     size_bytes INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS download_jobs(
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    total INTEGER NOT NULL DEFAULT 0,
+    done INTEGER NOT NULL DEFAULT 0,
+    downloaded INTEGER NOT NULL DEFAULT 0,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS jobs_recent ON download_jobs(created_at DESC);
 """
 
 
@@ -165,6 +177,40 @@ class Store:
             return [dict(r) for r in conn.execute(
                 "SELECT * FROM downloads ORDER BY updated_at DESC LIMIT ?", (max(1,min(limit,2000)),)
             )]
+
+    def create_job(self, job_id: str):
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                "INSERT INTO download_jobs(id,status,created_at,updated_at) VALUES(?,?,?,?)",
+                (job_id,"preparing",now,now)
+            )
+
+    def update_job(self, job_id: str, status: str, total: int = 0, done: int = 0,
+                   downloaded: int = 0, skipped: int = 0, failed: int = 0):
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                "UPDATE download_jobs SET status=?,total=?,done=?,downloaded=?,skipped=?,"
+                "failed=?,updated_at=? WHERE id=?",
+                (status,total,done,downloaded,skipped,failed,now,job_id)
+            )
+
+    def recent_jobs(self, limit: int = 20) -> list[dict]:
+        with self._lock, self._connection() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM download_jobs ORDER BY created_at DESC LIMIT ?",
+                (max(1,min(limit,100)),)
+            )]
+
+    def interrupt_unfinished_jobs(self):
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                "UPDATE download_jobs SET status='interrupted',updated_at=? "
+                "WHERE status IN ('preparing','running','cancelling')",
+                (now,)
+            )
 
     def record_download(self, url: str, filename: str, path: str, status: str, course_name: str = ""):
         filepath = Path(path)
