@@ -32,20 +32,28 @@ _SECRET_KEY_FILE = Path(__file__).parent / ".secret_key"
 
 
 def _load_secret_key() -> bytes:
+    """Create Flask signing key with 0600 permissions from the first write."""
     if _SECRET_KEY_FILE.exists():
         try:
             _SECRET_KEY_FILE.chmod(0o600)
-            return _SECRET_KEY_FILE.read_bytes()
+            key = _SECRET_KEY_FILE.read_bytes()
+            if len(key) >= 32:
+                return key
         except OSError:
             pass
     key = os.urandom(32)
     try:
-        _SECRET_KEY_FILE.write_bytes(key)
-        _SECRET_KEY_FILE.chmod(0o600)
+        fd = os.open(_SECRET_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(key)
+    except FileExistsError:
+        try:
+            return _SECRET_KEY_FILE.read_bytes()
+        except OSError:
+            pass
     except OSError:
         pass
     return key
-
 
 def _check_web_auth():
     """Optional HTTP Basic Auth via WEB_AUTH env var (format: 'user:password')."""
