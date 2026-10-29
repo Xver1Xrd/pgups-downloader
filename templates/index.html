@@ -89,7 +89,9 @@ async function fetchData() {
         ${itemsHtml ? `<div class="item-list">${itemsHtml}</div>` : ''}
       </div>`;
     }).join('');
-    bar.textContent = 'Обновлено: ' + new Date().toLocaleTimeString('ru-RU');
+    bar.textContent = data.offline
+      ? 'Офлайн — показаны последние сохранённые оценки'
+      : 'Обновлено: ' + new Date().toLocaleTimeString('ru-RU');
   } catch(e) {
     grid.innerHTML = skeleton(8);
     bar.textContent = 'Ошибка загрузки';
