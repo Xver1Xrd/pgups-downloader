@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Файлы — PGUPS{% endblock %}
+{% block content %}
+<h1 class="page-title">Загруженные файлы</h1>
+<div class="card">
+  <div class="form-group">
+    <label class="form-label" for="filter">Поиск по локальной библиотеке</label>
+    <input id="filter" class="form-input" type="search" placeholder="Имя файла или дисциплина…">
+  </div>
+  <p id="summary" class="status-bar" role="status">Загрузка…</p>
+  <div class="item-list" id="files"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+let loadedFiles = [];
+function renderFiles() {
+  const term = document.getElementById("filter").value.toLocaleLowerCase("ru");
+  const parent = document.getElementById("files");
+  parent.replaceChildren();
+  const matches = loadedFiles.filter(file => (file.filename + " " + file.course_name).toLocaleLowerCase("ru").includes(term));
+  for (const file of matches) {
+    const row = document.createElement("div");
+    row.className = "item-row";
+    const text = document.createElement("span");
+    text.className = "item-name";
+    text.textContent = file.filename + " · " + (file.course_name || "Без курса") + " · " + file.status;
+    const copy = document.createElement("button");
+    copy.className = "btn btn-outline btn-sm";
+    copy.textContent = "Копировать путь";
+    copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(file.path); flash("Путь скопирован", "success"); }
+      catch { flash("Не удалось скопировать путь", "error"); }
+    });
+    row.append(text,copy);
+    parent.appendChild(row);
+  }
+  document.getElementById("summary").textContent = "Найдено файлов: " + matches.length;
+}
+document.getElementById("filter").addEventListener("input",renderFiles);
+(async () => {
+  try {
+    const response = await fetch("/api/files");
+    if (!response.ok) throw Error("Ошибка загрузки списка файлов");
+    loadedFiles = (await response.json()).files;
+    renderFiles();
+  } catch(error) { document.getElementById("summary").textContent = error.message; }
+})();
+</script>
+{% endblock %}
