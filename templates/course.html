@@ -58,7 +58,9 @@ async function fetchData() {
     const data = await r.json();
     if (data.error) { document.getElementById('course-title').textContent = 'Ошибка'; bar.textContent = data.error; return; }
     render(data);
-    bar.textContent = 'Обновлено: ' + new Date().toLocaleTimeString('ru-RU');
+    bar.textContent = data.stale
+      ? 'Офлайн — показаны последние сохранённые оценки'
+      : 'Обновлено: ' + new Date().toLocaleTimeString('ru-RU');
   } catch(e) { bar.textContent = 'Ошибка обновления'; }
 }
 setInterval(fetchData, 15000);
