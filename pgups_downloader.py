@@ -192,12 +192,30 @@ class PgupsDownloader:
             with open(COOKIES_FILE, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
-                    if not line or line.startswith("#"):
+                    if not line:
+                        continue
+                    http_only = line.startswith("#HttpOnly_")
+                    if http_only:
+                        line = line[len("#HttpOnly_"):]
+                    elif line.startswith("#"):
                         continue
                     parts = line.split("\t")
                     if len(parts) >= 7:
                         domain, _, path, secure, expires, name, value = parts[:7]
-                        self.session.cookies.set(name, value, domain=domain, path=path)
+                        if domain.lstrip(".") not in ("sdo.pgups.ru", "my.pgups.ru", "pgups.ru"):
+                            continue
+                        try:
+                            expiry = int(expires)
+                        except ValueError:
+                            expiry = None
+                        if expiry and expiry < time.time():
+                            continue
+                        cookie = requests.cookies.create_cookie(
+                            name=name, value=value, domain=domain, path=path or "/",
+                            secure=secure.upper() == "TRUE", expires=expiry,
+                            rest={"HttpOnly": True} if http_only else {}
+                        )
+                        self.session.cookies.set_cookie(cookie)
                         count += 1
                         if "sdo.pgups.ru" in domain and name == "MoodleSession":
                             moodle_found = True
@@ -280,12 +298,16 @@ class PgupsDownloader:
             self._save_session_cookies()
         return ok
 
-    def _save_session_cookies(self):
-        # Adopt cookies from the Flask thread that successfully completed SSO.
+    def publish_session_cookies(self):
+        """Publish the active request thread's cookies for subsequent web requests."""
         active = self._http_session()
         if active is not self.session:
             self.session.cookies.clear()
             self.session.cookies.update(active.cookies)
+        self._session_version += 1
+
+    def _save_session_cookies(self):
+        self.publish_session_cookies()
         now_ts = int(time.time()) + 86400 * 7
         lines = ["# Netscape HTTP Cookie File"]
         seen = set()
@@ -301,7 +323,8 @@ class PgupsDownloader:
             path = cookie.path or "/"
             secure = "TRUE" if cookie.secure else "FALSE"
             expires = str(int(cookie.expires)) if cookie.expires else str(now_ts)
-            lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{cookie.name}\t{cookie.value}")
+            prefix = "#HttpOnly_" if cookie._rest.get("HttpOnly") else ""
+            lines.append(f"{prefix}{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{cookie.name}\t{cookie.value}")
         try:
             _atomic_private_write(COOKIES_FILE, "\n".join(lines) + "\n")
             self._session_version += 1
