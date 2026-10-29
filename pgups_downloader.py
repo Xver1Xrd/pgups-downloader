@@ -281,6 +281,11 @@ class PgupsDownloader:
         return ok
 
     def _save_session_cookies(self):
+        # Adopt cookies from the Flask thread that successfully completed SSO.
+        active = self._http_session()
+        if active is not self.session:
+            self.session.cookies.clear()
+            self.session.cookies.update(active.cookies)
         now_ts = int(time.time()) + 86400 * 7
         lines = ["# Netscape HTTP Cookie File"]
         seen = set()
@@ -298,7 +303,7 @@ class PgupsDownloader:
             expires = str(int(cookie.expires)) if cookie.expires else str(now_ts)
             lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{cookie.name}\t{cookie.value}")
         try:
-            _atomic_private_write(COOKIES_FILE, "\\n".join(lines) + "\\n")
+            _atomic_private_write(COOKIES_FILE, "\n".join(lines) + "\n")
             self._session_version += 1
             log(f"[*] Сохранено {len(seen)} cookies")
         except OSError as e:
@@ -338,14 +343,14 @@ class PgupsDownloader:
             return None
 
     def login_via_portal(self, email: str, password: str, captcha: str = "", remember: bool = True, csrf_token: str = "") -> bool:
-        old_cookies = list(self.session.cookies)
+        old_cookies = list(self._http_session().cookies)
         success = False
 
         for attempt in range(8 if not captcha else 1):
             try:
                 if not captcha:
                     log(f"[*] Авто-капча: попытка {attempt + 1}/8…")
-                    token, captcha_img = get_csrf_and_captcha(self.session)
+                    token, captcha_img = get_csrf_and_captcha(self._http_session())
                     if not token or not captcha_img:
                         continue
                     csrf_token = token
@@ -394,15 +399,14 @@ class PgupsDownloader:
                     log(f"[✗] Капча неверна, редирект на /verify — пробуем снова")
                 if is_success:
                     log(f"[*] Редирект на: {r2.url}")
-                    self._save_session_cookies()
                     log(f"[DEBUG] cookies после входа: {[(c.name, c.domain) for c in self.session.cookies]}")
                     log("[*] Запуск SSO через my.pgups.ru/auth/sdo…")
                     sso_r = self.get(f"{MY_BASE_URL}/auth/sdo", timeout=15, allow_redirects=True)
                     log(f"[DEBUG] SSO response: url={sso_r.url}, status={sso_r.status_code}")
                     log(f"[DEBUG] cookies после SSO: {[(c.name, c.domain) for c in self.session.cookies]}")
-                    self._save_session_cookies()
-                    log(f"[DEBUG] cookies после сохранения: {[(c.name, c.domain) for c in self.session.cookies]}")
+                    log(f"[DEBUG] cookies после SSO (перед сохранением): {[(c.name, c.domain) for c in self.session.cookies]}")
                     if self.verify_auth():
+                        self._save_session_cookies()
                         success = True
                         log("[✓] Вход через портал выполнен")
                         break
@@ -412,6 +416,7 @@ class PgupsDownloader:
                         force_r = self.get(f"{BASE_URL}/my/", timeout=10, allow_redirects=True)
                         log(f"[DEBUG] Принудительный переход: url={force_r.url}")
                         if self.verify_auth():
+                            self._save_session_cookies()
                             success = True
                             log("[✓] Вход через портал выполнен (принудительно)")
                             break
@@ -434,10 +439,12 @@ class PgupsDownloader:
 
     def _restore_cookies(self, old_cookies: list):
         try:
-            self.session.cookies.clear()
+            active = self._http_session()
+            active.cookies.clear()
             for c in old_cookies:
-                self.session.cookies.set(c.name, c.value, domain=c.domain, path=c.path)
-            self._session_version += 1
+                active.cookies.set_cookie(c)
+            if active is self.session:
+                self._session_version += 1
         except Exception:
             pass
 
@@ -542,10 +549,30 @@ class PgupsDownloader:
                     files.append({"url": full_url, "filename": filename, "type": "attachment"})
         return files
 
+    def _trusted_file_request(self, method: str, url: str, **kwargs) -> requests.Response:
+        """Reject cross-origin redirects before transmitting authenticated requests."""
+        for _ in range(6):
+            parsed = urlsplit(url)
+            if (parsed.scheme != "https" or parsed.hostname != "sdo.pgups.ru"
+                    or parsed.username or parsed.password or parsed.port not in (None, 443)):
+                raise ValueError("Недоверенный адрес файла или перенаправления")
+            if method == "HEAD":
+                response = self.head(url, allow_redirects=False, **kwargs)
+            else:
+                response = self.get(url, allow_redirects=False, **kwargs)
+            if response.status_code not in (301, 302, 303, 307, 308):
+                return response
+            location = response.headers.get("Location")
+            response.close()
+            if not location:
+                raise ValueError("Перенаправление без Location")
+            url = urljoin(url, location)
+        raise ValueError("Слишком много перенаправлений")
+
     def check_remote_size(self, url: str) -> tuple[int | None, str | None]:
         """Возвращает (размер, etag/md5), если сервер поддерживает."""
         try:
-            r = self.head(url, timeout=10, allow_redirects=True)
+            r = self._trusted_file_request("HEAD", url, timeout=10)
             if r.status_code == 200:
                 size = r.headers.get("Content-Length")
                 etag = r.headers.get("ETag")
@@ -584,10 +611,12 @@ class PgupsDownloader:
                     raise ValueError("Отказ от записи через символическую ссылку")
                 remote_size, remote_etag = self.check_remote_size(url)
                 log(f"  ↓ {filename}")
-                with self.get(url, stream=True, timeout=(10, 120)) as r:
+                with self._trusted_file_request("GET", url, stream=True, timeout=(10, 120)) as r:
                     r.raise_for_status()
                     if "text/html" in r.headers.get("Content-Type", "").lower():
                         raise ValueError("Сервер вернул HTML вместо файла (возможно, истекла сессия)")
+                    if r.headers.get("Content-Length", "").isdigit() and int(r.headers["Content-Length"]) > 1024 * 1024 * 1024:
+                        raise ValueError("Файл превышает допустимый размер (1 ГиБ)")
                     with tempfile.NamedTemporaryFile(mode="wb", dir=folder, prefix=".pgups-", suffix=".part", delete=False) as target:
                         tmp_path = Path(target.name)
                         new_hash = hashlib.sha256()
@@ -598,6 +627,8 @@ class PgupsDownloader:
                             target.write(chunk)
                             new_hash.update(chunk)
                             total += len(chunk)
+                            if total > 1024 * 1024 * 1024:
+                                raise ValueError("Файл превышает допустимый размер (1 ГиБ)")
                         target.flush()
                         os.fsync(target.fileno())
 
