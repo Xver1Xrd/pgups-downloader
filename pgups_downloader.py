@@ -240,21 +240,31 @@ class PgupsDownloader:
         return moodle_found
 
     def verify_auth(self) -> bool:
+        """Verify response is an authenticated Moodle page, not a redirect/error."""
         try:
             r = self.get(f"{BASE_URL}/my/", timeout=10)
-            login_in_url = "login" in r.url.lower()
-            guest_in_text = "Гость" in r.text or "гостевой доступ" in r.text.lower()
-            log(f"[DEBUG] verify_auth: url={r.url}, has_login={login_in_url}, has_guest={guest_in_text}")
-            if login_in_url:
-                log(f"[DEBUG]  → перенаправлен на логин")
+            if r.status_code != 200 or not trusted_moodle_url(r.url):
                 return False
-            if guest_in_text:
-                log(f"[DEBUG]  → гостевой доступ")
+            path = urlsplit(r.url).path.lower()
+            if path.startswith("/login") or path.startswith("/auth"):
                 return False
-            log(f"[DEBUG]  → авторизован")
-            return True
-        except Exception as e:
-            log(f"[DEBUG] verify_auth error: {e}")
+            soup = BeautifulSoup(r.text, "html.parser")
+            text = soup.get_text(" ", strip=True).lower()
+            if ("гостевой доступ" in text or "you are currently using guest access" in text
+                    or soup.select_one('form[action*="login/index.php"]')
+                    or soup.select_one('input[name="logintoken"]')):
+                return False
+            # Moodle usually exposes a user menu or logout action when signed in.
+            if (soup.select_one(".usermenu, #user-menu-toggle, a[href*='/login/logout.php']")
+                    or soup.select_one('[data-action="user-menu-toggle"]')):
+                return True
+            # Some custom Moodle themes have no standard menu; a valid /my/
+            # dashboard plus a MoodleSession cookie remains a secondary signal.
+            cookies = self._http_session().cookies
+            has_session = any(c.name == "MoodleSession" and c.domain.lstrip(".") == "sdo.pgups.ru"
+                              for c in cookies)
+            return has_session and path.startswith("/my")
+        except (requests.RequestException, ValueError):
             return False
 
     def login(self, username: str, password: str) -> bool:
