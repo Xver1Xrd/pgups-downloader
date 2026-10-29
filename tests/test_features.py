@@ -102,3 +102,59 @@ def test_streamed_download_is_atomic(monkeypatch, tmp_path):
     assert (tmp_path/"sample.pdf").read_bytes() == data
     assert not list(tmp_path.glob("*.part"))
     assert not dl.download_file(url, "sample.pdf", tmp_path)
+
+
+def test_offline_course_fallback(monkeypatch, tmp_path):
+    import web_app
+    store = Store(tmp_path / "offline.sqlite3")
+    store.snapshot_course("77","Offline course",[{"id":"1","name":"Task","status":"+ отлично"}])
+    monkeypatch.setattr(web_app, "store", store)
+    monkeypatch.setattr(web_app, "ensure_auth", lambda: False)
+    monkeypatch.setattr(web_app, "_check_web_auth", lambda: True)
+    with web_app.app.test_client() as client:
+        result = client.get("/api/courses").get_json()
+        assert result["offline"] is True
+        assert any(c["id"] == "77" for c in result["courses"])
+        course = client.get("/api/course/77").get_json()
+        assert course["stale"] is True
+        assert course["passed"] == 1
+
+
+def test_cancelled_download_creates_no_file(monkeypatch,tmp_path):
+    import threading
+    import pgups_downloader as module
+    monkeypatch.setattr(module, "COOKIES_FILE", tmp_path / "nonexistent")
+    monkeypatch.setattr(module, "load_config", lambda: {"courses": []})
+    dl = module.PgupsDownloader()
+    event = threading.Event()
+    event.set()
+    assert not dl.download_file("https://sdo.pgups.ru/pluginfile.php/123", "work.pdf", tmp_path, cancel_event=event)
+    assert not (tmp_path / "work.pdf").exists()
+
+
+def test_course_discovery_ignores_external_links(monkeypatch,tmp_path):
+    import pgups_downloader as module
+    monkeypatch.setattr(module, "COOKIES_FILE", tmp_path / "nonexistent")
+    monkeypatch.setattr(module, "load_config", lambda: {"courses": []})
+    dl = module.PgupsDownloader()
+    class FakeResponse:
+        status_code = 200
+        url = "https://sdo.pgups.ru/my/courses.php"
+        text = ('<a href="https://evil.example/course/view.php?id=10">Bad</a>'
+                '<a href="/course/view.php?id=20">Good</a>'
+                '<a href="/course/view.php?id=20">Again</a>')
+        def raise_for_status(self): pass
+    monkeypatch.setattr(dl,"get",lambda *args,**kwargs: FakeResponse())
+    assert dl.discover_courses() == [{"id":"20","url":"https://sdo.pgups.ru/course/view.php?id=20"}]
+
+
+def test_malformed_port_does_not_crash(monkeypatch):
+    import web_app
+    monkeypatch.setattr(web_app, "_check_web_auth", lambda: True)
+    with web_app.app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["csrf"] = "test-token"
+        response = client.post("/api/settings/courses",
+            json={"url":"https://sdo.pgups.ru:not-a-port/course/view.php?id=1"},
+            headers={"X-CSRF-Token":"test-token"})
+        assert response.status_code == 400
