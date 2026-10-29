@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Дедлайны — PGUPS{% endblock %}
+{% block content %}
+<h1 class="page-title">Календарь дедлайнов</h1>
+<div class="card">
+  <div style="display:flex;gap:12px;justify-content:space-between;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+    <p id="summary" role="status">Загрузка дедлайнов…</p>
+    <a href="/api/calendar.ics" class="btn btn-outline btn-sm">Экспорт в календарь (.ics)</a>
+  </div>
+  <div id="deadlines" class="item-list" aria-live="polite"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(async () => {
+  const parent = document.getElementById("deadlines");
+  const summary = document.getElementById("summary");
+  try {
+    const response = await fetch("/api/calendar");
+    if (!response.ok) throw Error("Ошибка загрузки календаря");
+    const items = (await response.json()).deadlines;
+    items.sort((a,b) => (a.deadline_iso || "9999").localeCompare(b.deadline_iso || "9999"));
+    summary.textContent = items.length ? "Сохранено дедлайнов: " + items.length : "Сроки сдачи пока не обнаружены — проверьте курсы.";
+    for (const item of items) {
+      const row = document.createElement("div");
+      row.className = "item-row";
+      const label = document.createElement("span");
+      label.className = "item-name";
+      label.textContent = item.course_name + " · " + item.name;
+      const date = document.createElement("span");
+      date.className = "item-status";
+      date.textContent = item.deadline_iso ? new Date(item.deadline_iso).toLocaleString("ru-RU") : item.deadline;
+      if (item.deadline_iso && new Date(item.deadline_iso) < new Date() && !item.status.startsWith("+")) {
+        date.style.color = "var(--danger)";
+        date.title = "Возможная просрочка";
+      }
+      row.append(label,date);
+      parent.appendChild(row);
+    }
+  } catch (error) { summary.textContent = error.message; }
+})();
+</script>
+{% endblock %}
