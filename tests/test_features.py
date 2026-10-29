@@ -160,3 +160,18 @@ def test_malformed_port_does_not_crash(monkeypatch):
             json={"url":"https://sdo.pgups.ru:not-a-port/course/view.php?id=1"},
             headers={"X-CSRF-Token":"test-token"})
         assert response.status_code == 400
+
+
+def test_download_job_recovery(tmp_path):
+    db_path = tmp_path / "jobs.sqlite3"
+    db = Store(db_path)
+    db.create_job("abc123")
+    db.update_job("abc123","running",total=4,done=2,downloaded=1,skipped=1)
+    jobs = Store(db_path).recent_jobs()
+    assert jobs[0]["status"] == "running"
+    assert jobs[0]["done"] == 2
+    # On a new web process, unfinished jobs are marked interrupted.
+    db.interrupt_unfinished_jobs()
+    assert Store(db_path).recent_jobs()[0]["status"] == "interrupted"
+    db.update_job("abc123","cancelled",4,2,1,1,0)
+    assert Store(db_path).recent_jobs()[0]["status"] == "cancelled"
