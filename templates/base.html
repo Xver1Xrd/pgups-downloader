@@ -113,6 +113,10 @@ a:hover { text-decoration: underline; }
 .msg-success { background: var(--success-bg); color: var(--success); border: 1px solid #bbf7d0; }
 .msg-error { background: var(--danger-bg); color: var(--danger); border: 1px solid #fecaca; }
 
+.overview-kpis { display:grid; grid-template-columns: repeat(auto-fit,minmax(175px,1fr)); gap:12px; margin-bottom:20px; }
+.overview-kpi { padding:18px; }
+.overview-number { font-size:28px; line-height:1.2; font-weight:700; font-variant-numeric:tabular-nums; }
+.overview-label { color:var(--text-secondary); font-size:12px; margin-top:6px; }
 .course-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
 .course-card {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
