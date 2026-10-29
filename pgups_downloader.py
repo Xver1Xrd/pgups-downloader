@@ -9,7 +9,7 @@ import hashlib
 import tempfile
 import threading
 from pathlib import Path
-from urllib.parse import urljoin, unquote, urlsplit
+from urllib.parse import urljoin, unquote, urlsplit, parse_qs
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
@@ -523,6 +523,32 @@ class PgupsDownloader:
         except Exception as e:
             log(f"[!] get_course_name error for {course_url}: {e}")
             return fallback
+
+    def discover_courses(self) -> list[dict]:
+        """Find course links visible to the authenticated user on Moodle."""
+        found = {}
+        for page in ("/my/courses.php", "/my/"):
+            try:
+                r = self.get(f"{BASE_URL}{page}", timeout=15)
+                r.raise_for_status()
+                if not trusted_moodle_url(r.url) or "/login/" in r.url:
+                    continue
+                soup = BeautifulSoup(r.text, "html.parser")
+                for link in soup.select('a[href]'):
+                    url = urljoin(BASE_URL, link["href"])
+                    if not trusted_moodle_url(url):
+                        continue
+                    parsed = urlsplit(url)
+                    if parsed.path != "/course/view.php":
+                        continue
+                    cid = parse_qs(parsed.query).get("id", [""])[0]
+                    if cid.isascii() and cid.isdigit():
+                        found[cid] = {"id":cid,"url":f"{BASE_URL}/course/view.php?id={cid}"}
+                if found:
+                    break
+            except requests.RequestException as exc:
+                log(f"[DISCOVER] Ошибка чтения списка курсов: {exc}")
+        return sorted(found.values(), key=lambda item: int(item["id"]))
 
     def get_assignments_from_course(self, course_url: str) -> list[dict]:
         r = self.get(course_url, timeout=10)
