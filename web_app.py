@@ -333,7 +333,8 @@ def api_courses():
 
     ok = ensure_auth()
     if not ok:
-        result = {"courses": [{"id": c["id"], "name": "Нет авторизации", "error": True} for c in courses_snapshot]}
+        cached = store.cached_courses()
+        result = {"courses": cached if cached else [{"id": c["id"], "name": "Нет авторизации", "error": True} for c in courses_snapshot], "offline": bool(cached)}
         _courses_cache["data"] = result
         _courses_cache["time"] = now
         _courses_cache["_key"] = cache_key
@@ -353,6 +354,9 @@ def api_courses():
                 c = fut[f]
                 results.append({"id": c["id"], "name": f"Курс {c['id']}", "error": True})
 
+    # Prefer a last-known-good snapshot when one remote course fails.
+    cached_by_id = {c["id"]:c for c in store.cached_courses()}
+    results = [cached_by_id.get(r["id"], r) if r.get("error") else r for r in results]
     with check_lock:
         prev = dict(last_check)
         last_check.clear()
@@ -380,6 +384,9 @@ def api_courses():
 def api_course(course_id):
     ok = ensure_auth()
     if not ok:
+        cached = next((c for c in store.cached_courses() if c["id"] == course_id), None)
+        if cached:
+            return jsonify(cached)
         return jsonify({"error": "Нет авторизации"}), 401
     with courses_lock:
         course = next((c for c in dl.courses if c["id"] == course_id), None)
@@ -388,7 +395,10 @@ def api_course(course_id):
     try:
         rows, name = dl.check_course(course["url"])
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        cached = next((c for c in store.cached_courses() if c["id"] == course_id), None)
+        if cached:
+            return jsonify(cached)
+        return jsonify({"error": str(e)}), 502
     events = store.snapshot_course(str(course_id), name, rows)
     notify_events(events)
     stats = count_statuses(rows)
