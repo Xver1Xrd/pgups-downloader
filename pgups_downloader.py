@@ -6,8 +6,10 @@ import json
 import time
 import subprocess
 import hashlib
+import tempfile
+import threading
 from pathlib import Path
-from urllib.parse import urljoin, unquote
+from urllib.parse import urljoin, unquote, urlsplit
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
@@ -52,6 +54,30 @@ def sanitize(name: str, strip_задание: bool = False) -> str:
     return name or "untitled"
 
 
+def safe_filename(name: str) -> str:
+    """Discard untrusted URL path components and unsafe filesystem characters."""
+    name = unquote(str(name)).replace("\\", "/").split("/")[-1]
+    if name.strip() in ("", ".", ".."):
+        return "unnamed-file"
+    return sanitize(name)
+
+
+def _atomic_private_write(path: Path, contents: str):
+    """Never expose partially-written credential/cookie files."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".pgups-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            os.chmod(tmp_name, 0o600)
+            f.write(contents)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
 def load_config() -> dict:
     if not CONFIG_FILE.exists():
         return {}
@@ -65,10 +91,13 @@ def load_config() -> dict:
 
 def save_config(cfg: dict):
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        _atomic_private_write(
+            CONFIG_FILE,
+            json.dumps(cfg, indent=2, ensure_ascii=False),
+        )
     except OSError as e:
         log(f"[!] Ошибка записи config.json: {e}")
+        raise
 
 
 class PgupsDownloader:
@@ -84,61 +113,67 @@ class PgupsDownloader:
             "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         })
         self.config = load_config()
-        default_courses = self.config.get("courses")
-        if default_courses:
-            self.courses = default_courses
-        else:
-            self.courses = [
-                {"id": "4388", "url": f"{BASE_URL}/course/view.php?id=4388"},
-                {"id": "7036", "url": f"{BASE_URL}/course/view.php?id=7036"},
-                {"id": "7031", "url": f"{BASE_URL}/course/view.php?id=7031"},
-                {"id": "6920", "url": f"{BASE_URL}/course/view.php?id=6920"},
-                {"id": "6467", "url": f"{BASE_URL}/course/view.php?id=6467"},
-                {"id": "6964", "url": f"{BASE_URL}/course/view.php?id=6964"},
-                {"id": "7039", "url": f"{BASE_URL}/course/view.php?id=7039"},
-                {"id": "7009", "url": f"{BASE_URL}/course/view.php?id=7009"},
-            ]
-        if courses:
-            self.courses = courses
+        self.courses = list(courses if courses is not None else self.config.get("courses", []))
         self.workers = DEFAULT_WORKERS
+        self._owner_thread = threading.get_ident()
+        self._thread_local = threading.local()
+        self._session_version = 0
 
         # Load cookies on init so session is ready
         self.load_cookies()
 
-        adapter = requests.adapters.HTTPAdapter(
-            max_retries=requests.adapters.Retry(
-                total=3,
-                backoff_factor=1,
-                status_forcelist=[429, 500, 502, 503, 504],
-                allowed_methods=["GET", "POST"],
-            ),
-            pool_connections=10,
-            pool_maxsize=10,
-            pool_block=False,
-        )
-        self.session.mount("https://", adapter)
-        self.session.mount("http://", adapter)
+        self.session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=0))
+        self.session.mount("http://", requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=0))
+
+    def _http_session(self) -> requests.Session:
+        """Use an independent requests.Session and cookie jar in worker threads."""
+        if threading.get_ident() == self._owner_thread:
+            return self.session
+        local = self._thread_local
+        if getattr(local, "version", -1) != self._session_version:
+            old = getattr(local, "session", None)
+            if old is not None:
+                old.close()
+            client = requests.Session()
+            client.headers.update(self.session.headers)
+            client.cookies.update(self.session.cookies)
+            client.mount("https://", requests.adapters.HTTPAdapter(pool_connections=3, pool_maxsize=3, max_retries=0))
+            client.mount("http://", requests.adapters.HTTPAdapter(pool_connections=3, pool_maxsize=3, max_retries=0))
+            local.session = client
+            local.version = self._session_version
+        return local.session
 
     def _request_with_retry(self, method: str, url: str, max_retries: int = MAX_RETRIES, **kwargs) -> requests.Response:
-        last_err = None
-        for attempt in range(max_retries):
+        method = method.upper()
+        # Authentication POST requests may have side effects: never retry them automatically.
+        attempts = max_retries if method in ("GET", "HEAD") else 1
+        timeout = kwargs.pop("timeout", 15)
+        last_error = None
+        for attempt in range(attempts):
             try:
-                r = self.session.request(method, url, timeout=kwargs.pop("timeout", 15), **{k: v for k, v in kwargs.items() if k != "stream"})
-                if r.status_code == 429:
-                    wait = RETRY_DELAY * (attempt + 1)
-                    log(f"[!] 429 Too Many Requests, ждём {wait}с")
-                    time.sleep(wait)
+                r = self._http_session().request(method, url, timeout=timeout, **kwargs)
+                if r.status_code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                    retry_after = r.headers.get("Retry-After", "")
+                    try:
+                        delay = min(max(float(retry_after), 0), 30)
+                    except ValueError:
+                        delay = min(RETRY_DELAY * (attempt + 1), 15)
+                    r.close()
+                    time.sleep(delay)
                     continue
                 return r
-            except requests.exceptions.RequestException as e:
-                last_err = e
-                log(f"[!] Запрос {method} {url} (попытка {attempt + 1}/{max_retries}) упал: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(RETRY_DELAY * (attempt + 1))
-        raise last_err
+            except requests.exceptions.RequestException as exc:
+                last_error = exc
+                if attempt == attempts - 1:
+                    break
+                time.sleep(min(RETRY_DELAY * (attempt + 1), 15))
+        raise last_error or requests.exceptions.RequestException("Request failed")
 
     def get(self, url: str, **kwargs) -> requests.Response:
         return self._request_with_retry("GET", url, **kwargs)
+
+    def head(self, url: str, **kwargs) -> requests.Response:
+        return self._request_with_retry("HEAD", url, **kwargs)
 
     def post(self, url: str, **kwargs) -> requests.Response:
         return self._request_with_retry("POST", url, **kwargs)
@@ -168,6 +203,7 @@ class PgupsDownloader:
         except (OSError, UnicodeDecodeError) as e:
             log(f"[!] Ошибка чтения cookies.txt: {e}")
             return False
+        self._session_version += 1
         log(f"[*] Загружено {count} cookies, MoodleSession: {moodle_found}")
         return moodle_found
 
@@ -258,8 +294,8 @@ class PgupsDownloader:
             expires = str(int(cookie.expires)) if cookie.expires else str(now_ts)
             lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{cookie.name}\t{cookie.value}")
         try:
-            with open(COOKIES_FILE, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
+            _atomic_private_write(COOKIES_FILE, "\\n".join(lines) + "\\n")
+            self._session_version += 1
             log(f"[*] Сохранено {len(seen)} cookies")
         except OSError as e:
             log(f"[!] Ошибка сохранения cookies: {e}")
@@ -388,13 +424,16 @@ class PgupsDownloader:
 
         if not success and not captcha:
             log("[!] Авто-капча не удалась после 8 попыток")
-        self._restore_cookies(old_cookies)
+        if not success:
+            self._restore_cookies(old_cookies)
         return success
 
     def _restore_cookies(self, old_cookies: list):
         try:
+            self.session.cookies.clear()
             for c in old_cookies:
                 self.session.cookies.set(c.name, c.value, domain=c.domain, path=c.path)
+            self._session_version += 1
         except Exception:
             pass
 
@@ -477,7 +516,7 @@ class PgupsDownloader:
                 if full_url in seen_urls:
                     continue
                 seen_urls.add(full_url)
-                filename = unquote(full_url.split("/")[-1].split("?")[0])
+                filename = safe_filename(urlsplit(full_url).path.split("/")[-1])
                 files.append({"url": full_url, "filename": filename, "type": "submission"})
         return files
 
@@ -494,7 +533,7 @@ class PgupsDownloader:
                 if full_url in seen_urls:
                     continue
                 seen_urls.add(full_url)
-                filename = unquote(full_url.split("/")[-1].split("?")[0])
+                filename = safe_filename(urlsplit(full_url).path.split("/")[-1])
                 if filename:
                     files.append({"url": full_url, "filename": filename, "type": "attachment"})
         return files
@@ -502,7 +541,7 @@ class PgupsDownloader:
     def check_remote_size(self, url: str) -> tuple[int | None, str | None]:
         """Возвращает (размер, etag/md5), если сервер поддерживает."""
         try:
-            r = self.get(url, timeout=10, method="HEAD")
+            r = self.head(url, timeout=10, allow_redirects=True)
             if r.status_code == 200:
                 size = r.headers.get("Content-Length")
                 etag = r.headers.get("ETag")
@@ -523,59 +562,72 @@ class PgupsDownloader:
             return None
 
     def download_file(self, url: str, filename: str, folder: Path, max_retries: int = MAX_RETRIES) -> bool:
+        """Stream to a private temporary file, verify, then atomically replace."""
+        folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
+        filename = safe_filename(filename)
         filepath = folder / filename
 
-        for attempt in range(max_retries):
+        for attempt in range(max(1, max_retries)):
             tmp_path = None
             try:
+                # Never overwrite a symlink outside the intended directory.
+                if filepath.is_symlink():
+                    raise ValueError("Отказ от записи через символическую ссылку")
                 remote_size, remote_etag = self.check_remote_size(url)
+                log(f"  ↓ {filename}")
+                with self.get(url, stream=True, timeout=(10, 120)) as r:
+                    r.raise_for_status()
+                    if "text/html" in r.headers.get("Content-Type", "").lower():
+                        raise ValueError("Сервер вернул HTML вместо файла (возможно, истекла сессия)")
+                    with tempfile.NamedTemporaryFile(mode="wb", dir=folder, prefix=".pgups-", suffix=".part", delete=False) as target:
+                        tmp_path = Path(target.name)
+                        new_hash = hashlib.sha256()
+                        total = 0
+                        for chunk in r.iter_content(chunk_size=65536):
+                            if not chunk:
+                                continue
+                            target.write(chunk)
+                            new_hash.update(chunk)
+                            total += len(chunk)
+                        target.flush()
+                        os.fsync(target.fileno())
 
-                if remote_size is not None and remote_etag is None:
-                    if filepath.exists() and filepath.stat().st_size == remote_size:
+                length = r.headers.get("Content-Length")
+                if length and length.isdigit() and total != int(length):
+                    raise IOError(f"Неполная загрузка: {total} / {length} байт")
+                if remote_size is not None and total != remote_size:
+                    raise IOError("Размер загруженного файла отличается от размера на сервере")
+                digest = new_hash.hexdigest()
+                if filepath.exists() and self.compute_local_hash(filepath) == digest:
+                    tmp_path.unlink()
+                    return False
+
+                # Duplicate hashes are checked only inside this assignment folder.
+                for existing in folder.iterdir():
+                    if existing == tmp_path or existing == filepath or existing.is_symlink() or not existing.is_file():
+                        continue
+                    if existing.stat().st_size == total and self.compute_local_hash(existing) == digest:
+                        tmp_path.unlink()
+                        log(f"    уже есть: {existing.name}")
                         return False
 
-                log(f"  ↓ {filename}")
-                r = self.get(url, stream=True, timeout=120)
-                r.raise_for_status()
-
-                tmp_path = folder / f".{filename}.part"
-                with open(tmp_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-
-                new_size = tmp_path.stat().st_size
-                local_hash = self.compute_local_hash(tmp_path)
-
-                for existing in folder.iterdir():
-                    if existing.name.endswith(".part") or not existing.is_file():
-                        continue
-                    if existing.name != filepath.name:
-                        existing_hash = self.compute_local_hash(existing)
-                        if existing_hash and local_hash and existing_hash == local_hash:
-                            tmp_path.unlink()
-                            log(f"     уже есть: {existing.name}")
-                            return False
-
-                updated = filepath.exists()
-                if updated:
-                    filepath.unlink()
-                tmp_path.rename(filepath)
-                icon = "↻" if updated else "✓"
-                log(f"    {icon} {new_size / 1024:.1f} KB")
+                if filepath.is_symlink():
+                    raise ValueError("Целевой путь стал символической ссылкой")
+                os.replace(tmp_path, filepath)
+                tmp_path = None
+                log(f"    ✓ {total / 1024:.1f} KB")
                 return True
-
-            except Exception as e:
-                log(f"    ✗ попытка {attempt + 1}/{max_retries} ошибка: {e}")
-                if tmp_path and tmp_path.exists():
+            except (OSError, ValueError, requests.RequestException) as e:
+                log(f"    ✗ попытка {attempt + 1}/{max_retries}: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(min(RETRY_DELAY * (attempt + 1), 15))
+            finally:
+                if tmp_path is not None:
                     try:
-                        tmp_path.unlink()
+                        tmp_path.unlink(missing_ok=True)
                     except OSError:
                         pass
-                if attempt < max_retries - 1:
-                    time.sleep(RETRY_DELAY * (attempt + 1))
-
-        log(f"    ✗ не удалось скачать {filename} после {max_retries} попыток")
         return False
 
     def _check_submission_and_deadline(self, assign_url: str) -> tuple[bool, str | None]:
@@ -841,7 +893,8 @@ class PgupsDownloader:
 
         if not username:
             username = self.config.get("login", "")
-            password = self.config.get("password", "")
+            from secret_store import get_password
+            password = get_password(username) or self.config.get("password", "")
 
         if username and password:
             log(f"[DEBUG] Trying login with saved credentials")
@@ -900,8 +953,10 @@ class PgupsDownloader:
         self.workers = workers
 
         if save_login and username and password:
+            from secret_store import save_password
+            save_password(username, password)
             self.config["login"] = username
-            self.config["password"] = password
+            self.config.pop("password", None)
             self.config["courses"] = self.courses
             save_config(self.config)
             log("[*] Логин/пароль сохранены в config.json")
@@ -935,7 +990,8 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Скачиватор лаб PGUPS")
     parser.add_argument("--login", help="Логин")
-    parser.add_argument("--pass", dest="password", help="Пароль")
+    parser.add_argument("--pass", dest="password", help="Пароль (небезопасно: виден в истории команд)")
+    parser.add_argument("--prompt-password", action="store_true", help="Запросить пароль без отображения")
     parser.add_argument("--save-login", action="store_true",
                         help="Сохранить логин/пароль в config.json для авто-входа")
     parser.add_argument("--workers", type=int, default=None,
@@ -959,6 +1015,9 @@ def main():
     parser.add_argument("--captcha", type=str, default="",
                         help="Код капчи для входа через портал")
     args = parser.parse_args()
+    if args.prompt_password:
+        import getpass
+        args.password = getpass.getpass("Пароль ЭИОС: ")
 
     dl = PgupsDownloader()
 
