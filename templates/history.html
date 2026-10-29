@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}История — PGUPS{% endblock %}
+{% block content %}
+<h1 class="page-title">История оценок и заданий</h1>
+<p class="status-bar" id="summary" role="status">Загрузка истории…</p>
+<div class="card">
+  <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;text-align:left">
+    <thead><tr><th style="padding:10px">Дата</th><th>Дисциплина</th><th>Задание</th><th>Изменение</th></tr></thead>
+    <tbody id="history"></tbody>
+  </table></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(async () => {
+  const body = document.getElementById("history");
+  const info = document.getElementById("summary");
+  try {
+    const resp = await fetch("/api/history");
+    if (!resp.ok) throw Error("Не удалось получить историю");
+    const events = (await resp.json()).events;
+    info.textContent = events.length ? "Сохранённые изменения: " + events.length : "Пока нет изменений. Первая проверка создаёт исходный снимок.";
+    for (const event of events) {
+      const tr = document.createElement("tr");
+      const values = [new Date(event.occurred_at).toLocaleString("ru-RU"),event.course_name,
+        event.item_name,(event.old_status || "Новое задание") + " → " + event.new_status];
+      for (const value of values) {
+        const td = document.createElement("td");
+        td.textContent = value;
+        td.style.padding = "10px";
+        td.style.borderBottom = "1px solid var(--border)";
+        tr.appendChild(td);
+      }
+      body.appendChild(tr);
+    }
+  } catch (error) { info.textContent = error.message; }
+})();
+</script>
+{% endblock %}
