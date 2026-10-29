@@ -3,6 +3,7 @@
 {% block content %}
 <h1 class="page-title">Успеваемость по курсам</h1>
 <div class="status-bar" id="status-bar">Загрузка…</div>
+<div id="overview" class="overview-kpis"></div>
 <div id="course-grid" class="course-grid"></div>
 {% endblock %}
 {% block scripts %}
@@ -47,6 +48,31 @@ async function fetchData() {
       grid.innerHTML = '<div class="card"><p style="color:var(--text-secondary);">Нет курсов. <a href="/add-course">Добавьте курс</a></p></div>';
       bar.textContent = '';
       return;
+    }
+    const valid = data.courses.filter(c => !c.error);
+    const totals = valid.reduce((acc,c) => {
+      for (const key of ['passed','failed','submitted','locked','pending']) acc[key] += Number(c[key] || 0);
+      return acc;
+    }, {passed:0,failed:0,submitted:0,locked:0,pending:0});
+    const summary = [
+      {label:'Дисциплин',value:valid.length},
+      {label:'Зачтено работ',value:totals.passed},
+      {label:'На проверке',value:totals.submitted},
+      {label:'Нужны действия',value:totals.failed + totals.pending},
+    ];
+    const overview = document.getElementById('overview');
+    overview.replaceChildren();
+    for (const item of summary) {
+      const card = document.createElement('div');
+      card.className = 'card overview-kpi';
+      const number = document.createElement('div');
+      number.className = 'overview-number';
+      number.textContent = item.value;
+      const title = document.createElement('div');
+      title.className = 'overview-label';
+      title.textContent = item.label;
+      card.append(number,title);
+      overview.appendChild(card);
     }
     grid.innerHTML = data.courses.map((c, ci) => {
       if (c.error) {
