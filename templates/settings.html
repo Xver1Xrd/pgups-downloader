@@ -15,6 +15,7 @@
       {% endfor %}
     </ul>
     <a href="/add-course" class="btn btn-outline btn-sm" style="margin-top:10px;">Добавить курс</a>
+    <button class="btn btn-outline btn-sm" onclick="discoverCourses()" style="margin-top:10px;">Найти мои курсы автоматически</button>
   </div>
 
   <div class="card">
@@ -88,6 +89,16 @@ async function saveAutomation() {
 }
 loadAutomation();
 
+async function discoverCourses() {
+  try {
+    flash("Ищем доступные курсы ЭИОС…", "success");
+    const r = await fetch("/api/courses/discover",{method:"POST"});
+    const result = await r.json();
+    if (!r.ok) throw Error(result.error || "Ошибка поиска");
+    flash("Найдено курсов: " + result.discovered, "success");
+    window.setTimeout(() => location.reload(), 900);
+  } catch(error) { flash(error.message, "error"); }
+}
 function showLoginForm() {
   document.getElementById('login-form').style.display = 'block';
 }
