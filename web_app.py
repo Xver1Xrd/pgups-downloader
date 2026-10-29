@@ -119,6 +119,8 @@ def ensure_auth():
 
 def _load_course_names_parallel(courses_list: list[dict]) -> list[dict]:
     """Загрузка имён курсов параллельно."""
+    if not courses_list:
+        return []
     with ThreadPoolExecutor(max_workers=min(len(courses_list), 5)) as pool:
         futures = {
             pool.submit(dl.get_course_name, c["url"]): c
@@ -413,7 +415,10 @@ def api_settings_login():
     if password:
         if not (login or cfg.get("login", "")):
             return jsonify({"error": "Укажите логин перед сохранением пароля"}), 400
-        save_password(login or cfg.get("login", ""), password)
+        try:
+            save_password(login or cfg.get("login", ""), password)
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 503
         cfg.pop("password", None)
     save_config(cfg)
     log("[WEB] Логин/пароль сохранены")
