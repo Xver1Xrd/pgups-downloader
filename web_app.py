@@ -572,6 +572,28 @@ def api_settings_login():
     return jsonify({"status": "ok"})
 
 
+@app.route("/api/courses/discover", methods=["POST"])
+def api_discover_courses():
+    if not ensure_auth():
+        return jsonify({"error":"Авторизация в ЭИОС не выполнена"}), 401
+    discovered = dl.discover_courses()
+    if not discovered:
+        return jsonify({"error":"Не удалось найти курсы; добавьте их вручную"}), 404
+    with courses_lock:
+        saved = list(dl.courses)
+        existing_ids = {c["id"] for c in saved}
+        for course in discovered:
+            if course["id"] not in existing_ids:
+                saved.append(course)
+                existing_ids.add(course["id"])
+        cfg = load_config()
+        cfg["courses"] = saved
+        save_config(cfg)
+        dl.courses = saved
+    clear_courses_cache(_courses_cache)
+    return jsonify({"status":"ok","discovered":len(discovered),"total":len(saved)})
+
+
 @app.route("/api/settings/courses", methods=["GET", "POST", "DELETE"])
 def api_settings_courses():
     cfg = load_config()
