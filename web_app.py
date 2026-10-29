@@ -66,12 +66,11 @@ def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if not _check_web_auth():
-            auth_env = os.environ.get("WEB_AUTH", "")
-            if auth_env:
-                from flask import make_response
-                resp = make_response("Authentication required", 401)
+            from flask import make_response
+            resp = make_response("Authentication required", 401)
+            if os.environ.get("WEB_AUTH", ""):
                 resp.headers["WWW-Authenticate"] = 'Basic realm="PGUPS"'
-                return resp
+            return resp
         return f(*args, **kwargs)
     return decorated
 
@@ -94,7 +93,16 @@ CACHE_TTL = 300
 def get_creds() -> tuple[str, str]:
     cfg = load_config()
     login = cfg.get("login", "")
-    return login, get_password(login) or cfg.get("password", "")
+    password = get_password(login)
+    if not password and cfg.get("password") and login:
+        password = cfg["password"]
+        try:
+            save_password(login, password)
+            cfg.pop("password", None)
+            save_config(cfg)
+        except RuntimeError:
+            pass
+    return login, password or ""
 
 
 def ensure_auth():
@@ -403,6 +411,8 @@ def api_settings_login():
     if login:
         cfg["login"] = login
     if password:
+        if not (login or cfg.get("login", "")):
+            return jsonify({"error": "Укажите логин перед сохранением пароля"}), 400
         save_password(login or cfg.get("login", ""), password)
         cfg.pop("password", None)
     save_config(cfg)
