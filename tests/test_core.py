@@ -163,3 +163,34 @@ def test_moodle_html_rejects_offsite_assignments(monkeypatch, tmp_path):
     assignments = dl.get_assignments_from_course("https://sdo.pgups.ru/course/view.php?id=10")
     assert len(assignments) == 1
     assert assignments[0]["id"] == "34"
+
+
+def test_captcha_session_survives_new_worker(monkeypatch,tmp_path):
+    import threading
+    import pgups_downloader as module
+    monkeypatch.setattr(module, "COOKIES_FILE", tmp_path / "missing")
+    monkeypatch.setattr(module, "load_config", lambda: {"courses":[]})
+    dl = module.PgupsDownloader()
+    def get_captcha_in_worker():
+        dl._http_session().cookies.set("portal_session","secret",domain="my.pgups.ru",path="/")
+        dl.publish_session_cookies()
+    t = threading.Thread(target=get_captcha_in_worker)
+    t.start(); t.join()
+    observed = []
+    def login_in_new_worker():
+        observed.append(dl._http_session().cookies.get("portal_session",domain="my.pgups.ru",path="/"))
+    t = threading.Thread(target=login_in_new_worker)
+    t.start(); t.join()
+    assert observed == ["secret"]
+
+
+def test_secure_cookies_preserve_attributes(monkeypatch,tmp_path):
+    import pgups_downloader as module
+    monkeypatch.setattr(module, "COOKIES_FILE", tmp_path / "cookies.txt")
+    monkeypatch.setattr(module, "load_config", lambda: {"courses":[]})
+    dl = module.PgupsDownloader()
+    dl.session.cookies.set("MoodleSession","secret",domain="sdo.pgups.ru",path="/",secure=True)
+    dl._save_session_cookies()
+    next_dl = module.PgupsDownloader()
+    cookie = next(c for c in next_dl.session.cookies if c.name == "MoodleSession")
+    assert cookie.secure is True
