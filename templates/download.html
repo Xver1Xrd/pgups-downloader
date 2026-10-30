@@ -5,7 +5,7 @@
 
 <div class="card">
   <div class="card-title">Выберите курсы</div>
-  <div style="display:flex;flex-direction:column;gap:6px;">
+  <div id="course-list" style="display:flex;flex-direction:column;gap:6px;">
     {% for c in courses %}
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
       <input type="checkbox" value="{{ c.id }}" style="width:16px;height:16px;cursor:pointer;">
@@ -39,6 +39,7 @@
     <input type="number" id="workers" class="form-input" value="{{ default_workers }}" min="1" max="10" style="width:100px;">
   </div>
   <button class="btn btn-primary" onclick="startDownload()">Начать скачивание</button>
+  <button id="cancel-download" class="btn btn-outline" style="display:none" onclick="cancelDownload()">Отменить</button>
 </div>
 
 <div class="card" id="progress-card" style="display:none;margin-top:16px;">
@@ -47,9 +48,37 @@
   <div class="progress-mini" style="margin:12px 0;"><div class="progress-mini-fill" id="progress-fill" style="width:0%"></div></div>
   <div id="progress-text" style="font-size:12px;color:var(--text-secondary);"></div>
 </div>
+<div class="card" style="margin-top:16px;">
+  <div class="card-title">История загрузок</div>
+  <div class="item-list" id="download-jobs">Загрузка журнала…</div>
+</div>
 {% endblock %}
 {% block scripts %}
 <script>
+async function loadDownloadJobs() {
+  const parent = document.getElementById('download-jobs');
+  try {
+    const response = await fetch('/api/download/jobs');
+    if (!response.ok) throw Error('Ошибка получения истории');
+    const jobs = (await response.json()).jobs;
+    parent.replaceChildren();
+    if (!jobs.length) { parent.textContent = 'Пока нет загрузок'; return; }
+    for (const job of jobs) {
+      const row = document.createElement('div');
+      row.className = 'item-row';
+      const label = document.createElement('span');
+      label.className = 'item-name';
+      label.textContent = new Date(job.created_at).toLocaleString('ru-RU') + ' · ' + job.status;
+      const stats = document.createElement('span');
+      stats.className = 'item-status';
+      stats.textContent = job.done + '/' + job.total + ' · файлов: ' + job.downloaded;
+      row.append(label,stats);
+      parent.appendChild(row);
+    }
+  } catch(error) { parent.textContent = error.message; }
+}
+loadDownloadJobs();
+
 function toggleAllCourses(checked) {
   document.querySelectorAll('#course-list input').forEach(c => c.checked = checked);
 }
@@ -85,12 +114,21 @@ function startDownload() {
   });
 }
 
+async function cancelDownload() {
+  try {
+    const response = await fetch("/api/download/cancel", {method:"POST"});
+    if (!response.ok) throw Error("Не удалось отменить загрузку");
+    flash("Запрошена отмена загрузки", "success");
+  } catch(error) { flash(error.message,"error"); }
+}
+
 function pollProgress() {
   const card = document.getElementById('progress-card');
   const msg = document.getElementById('progress-message');
   const fill = document.getElementById('progress-fill');
   const text = document.getElementById('progress-text');
   card.style.display = 'block';
+  document.getElementById('cancel-download').style.display = '';
   const iv = setInterval(async () => {
     const r = await fetch('/api/download/status');
     const d = await r.json();
@@ -101,7 +139,11 @@ function pollProgress() {
       fill.style.width = total > 0 ? Math.round(done/total*100) + '%' : '0%';
       text.textContent = d.progress;
     }
-    if (!d.running) { clearInterval(iv); }
+    if (!d.running) {
+      clearInterval(iv);
+      document.getElementById('cancel-download').style.display = 'none';
+      loadDownloadJobs();
+    }
   }, 1000);
 }
 </script>

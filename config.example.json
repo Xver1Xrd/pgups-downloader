@@ -1,7 +1,9 @@
 {
   "login": "your@email.com",
-  "password": "your-password",
   "courses": [
     {"id": "4388", "url": "https://sdo.pgups.ru/course/view.php?id=4388"}
-  ]
+  ],
+  "auto_sync": false,
+  "sync_interval_minutes": 30,
+  "desktop_notifications": false
 }

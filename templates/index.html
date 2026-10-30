@@ -3,6 +3,7 @@
 {% block content %}
 <h1 class="page-title">Успеваемость по курсам</h1>
 <div class="status-bar" id="status-bar">Загрузка…</div>
+<div id="overview" class="overview-kpis"></div>
 <div id="course-grid" class="course-grid"></div>
 {% endblock %}
 {% block scripts %}
@@ -16,12 +17,15 @@ const STATUS_ICONS = {
   '?': '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 12.5A5.5 5.5 0 1 1 8 2.5a5.5 5.5 0 0 1 0 11z"/><text x="8" y="11" text-anchor="middle" fill="currentColor" font-size="9" font-weight="bold">?</text></svg>',
 };
 
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[ch]));
+}
 function fmtStatus(status) {
   const prefix = status[0];
   const icon = STATUS_ICONS[prefix] || '';
   const text = status.slice(1).trim();
   const cls = prefix === '+' ? 'ok' : prefix === '-' ? 'fail' : prefix === '~' ? 'sub' : prefix === '#' ? 'lock' : prefix === '?' ? 'warn' : 'pend';
-  return `<span class="item-icon item-icon-${cls}">${icon}</span><span>${text}</span>`;
+  return `<span class="item-icon item-icon-${cls}">${icon}</span><span>${escapeHtml(text)}</span>`;
 }
 
 function skeleton(count) {
@@ -45,9 +49,34 @@ async function fetchData() {
       bar.textContent = '';
       return;
     }
+    const valid = data.courses.filter(c => !c.error);
+    const totals = valid.reduce((acc,c) => {
+      for (const key of ['passed','failed','submitted','locked','pending']) acc[key] += Number(c[key] || 0);
+      return acc;
+    }, {passed:0,failed:0,submitted:0,locked:0,pending:0});
+    const summary = [
+      {label:'Дисциплин',value:valid.length},
+      {label:'Зачтено работ',value:totals.passed},
+      {label:'На проверке',value:totals.submitted},
+      {label:'Нужны действия',value:totals.failed + totals.pending},
+    ];
+    const overview = document.getElementById('overview');
+    overview.replaceChildren();
+    for (const item of summary) {
+      const card = document.createElement('div');
+      card.className = 'card overview-kpi';
+      const number = document.createElement('div');
+      number.className = 'overview-number';
+      number.textContent = item.value;
+      const title = document.createElement('div');
+      title.className = 'overview-label';
+      title.textContent = item.label;
+      card.append(number,title);
+      overview.appendChild(card);
+    }
     grid.innerHTML = data.courses.map((c, ci) => {
       if (c.error) {
-        return `<div class="course-card" style="animation-delay:${ci*0.06}s"><div class="course-card-header"><span class="course-card-title error">${c.name}</span></div></div>`;
+        return `<div class="course-card" style="animation-delay:${ci*0.06}s"><div class="course-card-header"><span class="course-card-title error">${escapeHtml(c.name)}</span></div></div>`;
       }
       const total = c.passed + c.failed + c.submitted + c.locked + c.pending;
       const done = c.passed + c.failed;
@@ -60,9 +89,9 @@ async function fetchData() {
       const itemsHtml = items.map((i, ii) => {
         const isExtra = ii >= limit;
         const cls = (i.changed ? 'item-row changed' : 'item-row') + (isExtra ? ' extra' : '');
-        const prevHtml = i.prev_status ? `<span class="item-prev">← ${i.prev_status}</span>` : '';
+        const prevHtml = i.prev_status ? `<span class="item-prev">← ${escapeHtml(i.prev_status)}</span>` : '';
         return `<div class="${cls}" style="animation-delay:${(ci*0.06 + ii*0.025)+0.15}s">
-          <span class="item-name">${i.name}</span>
+          <span class="item-name">${escapeHtml(i.name)}</span>
           <span class="item-status">${fmtStatus(i.status)}${prevHtml}</span>
         </div>`;
       }).join('') + (items.length > limit ? `<div class="item-row" style="justify-content:center;padding-top:6px;">
@@ -73,7 +102,7 @@ async function fetchData() {
 
       return `<div class="course-card" style="animation-delay:${ci*0.06}s">
         <div class="course-card-header">
-          <a class="course-card-title" href="/course/${c.id}">${c.name}</a>
+          <a class="course-card-title" href="/course/${encodeURIComponent(c.id)}">${escapeHtml(c.name)}</a>
           <div class="stats">
             <span class="stat stat-ok">${STATUS_ICONS['+']}${c.passed}</span>
             <span class="stat stat-fail">${STATUS_ICONS['-']}${c.failed}</span>
@@ -86,7 +115,9 @@ async function fetchData() {
         ${itemsHtml ? `<div class="item-list">${itemsHtml}</div>` : ''}
       </div>`;
     }).join('');
-    bar.textContent = 'Обновлено: ' + new Date().toLocaleTimeString('ru-RU');
+    bar.textContent = data.offline
+      ? 'Офлайн — показаны последние сохранённые оценки'
+      : 'Обновлено: ' + new Date().toLocaleTimeString('ru-RU');
   } catch(e) {
     grid.innerHTML = skeleton(8);
     bar.textContent = 'Ошибка загрузки';

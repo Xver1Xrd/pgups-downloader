@@ -1,0 +1,19 @@
+name: Python checks
+on:
+  push:
+    branches: [main, master, fix/security-and-download-reliability]
+  pull_request:
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt pytest pytest-cov ruff
+      - run: python -m compileall -q pgups_downloader.py web_app.py captcha_solver.py secret_store.py utils.py
+      - run: bash -n install-linux.sh
+      - run: python -m compileall -q .
+      - run: ruff check --select E9,F63,F7,F82 .
+      - run: python -m pytest -q --cov=pgups_downloader --cov=web_app --cov=storage --cov=calendar_utils --cov-report=term-missing

@@ -60,9 +60,9 @@ a:hover { text-decoration: underline; }
 @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
 
 .header { background: var(--surface); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 50; }
-.header-inner { max-width: 1200px; margin: 0 auto; display: flex; align-items: center; height: 56px; padding: 0 20px; gap: 24px; }
+.header-inner { max-width: 1200px; margin: 0 auto; display: flex; align-items: center; min-height: 56px; padding: 0 20px; gap: 24px; }
 .header-brand { font-weight: 700; font-size: 16px; color: var(--text); letter-spacing: -.3px; }
-.header-nav { display: flex; gap: 2px; }
+.header-nav { display: flex; gap: 2px; overflow-x: auto; white-space: nowrap; scrollbar-width: thin; }
 .header-nav a { color: var(--text-secondary); padding: 6px 12px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; text-decoration: none; transition: background .15s, color .15s; }
 .header-nav a:hover { background: var(--bg); color: var(--text); }
 .header-nav a.active { background: var(--accent-light); color: var(--accent); }
@@ -113,6 +113,10 @@ a:hover { text-decoration: underline; }
 .msg-success { background: var(--success-bg); color: var(--success); border: 1px solid #bbf7d0; }
 .msg-error { background: var(--danger-bg); color: var(--danger); border: 1px solid #fecaca; }
 
+.overview-kpis { display:grid; grid-template-columns: repeat(auto-fit,minmax(175px,1fr)); gap:12px; margin-bottom:20px; }
+.overview-kpi { padding:18px; }
+.overview-number { font-size:28px; line-height:1.2; font-weight:700; font-variant-numeric:tabular-nums; }
+.overview-label { color:var(--text-secondary); font-size:12px; margin-top:6px; }
 .course-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
 .course-card {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
@@ -185,6 +189,9 @@ a:hover { text-decoration: underline; }
     <nav class="header-nav">
       <a href="/" class="{% if request.path == '/' %}active{% endif %}">Успеваемость</a>
       <a href="/download" class="{% if request.path == '/download' %}active{% endif %}">Скачивание</a>
+      <a href="/calendar" class="{% if request.path == '/calendar' %}active{% endif %}">Дедлайны</a>
+      <a href="/history" class="{% if request.path == '/history' %}active{% endif %}">История</a>
+      <a href="/files" class="{% if request.path == '/files' %}active{% endif %}">Файлы</a>
       <a href="/add-course" class="{% if request.path == '/add-course' %}active{% endif %}">Добавить курс</a>
       <a href="/settings" class="{% if request.path == '/settings' %}active{% endif %}">Настройки</a>
     </nav>
@@ -197,6 +204,15 @@ a:hover { text-decoration: underline; }
 </div>
 <div class="footer">made by <a href="https://github.com/Xver1Xrd" target="_blank">xverlxrd</a></div>
 <script>
+window.CSRF_TOKEN = {{ csrf_token|tojson }};
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (url, options = {}) => {
+  const method = (options.method || 'GET').toUpperCase();
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && typeof url === 'string' && url.startsWith('/')) {
+    options = {...options, headers: {...options.headers, 'X-CSRF-Token': window.CSRF_TOKEN}};
+  }
+  return nativeFetch(url, options);
+};
 function flash(msg, type) {
   const c = document.getElementById('flash-container');
   const d = document.createElement('div');
